@@ -1,0 +1,286 @@
+// Links in the written pages: each internal one made canonical, error
+// codes linked to their pages, a Korean page's links into English-only
+// pages pointed there, and the check for broken ones.
+
+use pkg::layout;
+use pkg::layout::rel;
+use pkg::{Frag, Page, Site};
+use std::fs;
+use web::build::{attr_values, chars_of, dir_of};
+use web::url;
+
+/// `a/./b/../c` -> `a/c`; leading `..` kept.
+pub fn norm(p: str) -> str {
+    let segs: List<str> = List::new();
+    for s in p.split("/") {
+        if s.is_empty() || s == "." { continue; }
+        if s == ".." && segs.len() > 0 && segs[segs.len() - 1] != ".." {
+            segs.pop();
+            continue;
+        }
+        segs.push(s);
+    }
+    let out = StrBuf::new();
+    for k in 0..segs.len() {
+        if k > 0 { out.push('/'); }
+        out.push_str(segs[k]);
+    }
+    out.to_str()
+}
+
+pub fn join(dir: str, p: str) -> str {
+    if dir.is_empty() { p } else { dir + "/" + p }
+}
+
+/// `html` of the page `out` under the site directory `base` (`/latest`,
+/// `""` for a site root) with every internal `href`, `src` and `data-root`
+/// as its canonical root-relative address (web::url), and absolute links
+/// into either site canonical too (markdown autolinks bypass the link
+/// mappers). Pages are generated with relative links, so the link check
+/// and the archives stay independent of where a version is served; this
+/// is the last step.
+pub fn site_hrefs(site: Site, html: str, base: str, out: str) -> str {
+    let d = dir_of(out);
+    let dir = if d.is_empty() { base } else { base + "/" + d };
+    let cs = chars_of(html);
+    let n = cs.len();
+    let res = StrBuf::new();
+    let i = 0usize;
+    while i < n {
+        let name = "";
+        if i > 0 && (cs[i - 1] == ' ' || cs[i - 1] == '\n' || cs[i - 1] == '\t') {
+            for a in ["href=\"", "src=\"", "data-root=\""] {
+                let k = 0usize;
+                let ac = chars_of(a);
+                while k < ac.len() && i + k < n && cs[i + k] == ac[k] { k += 1; }
+                if k == ac.len() {
+                    name = a;
+                    break;
+                }
+            }
+        }
+        if name.is_empty() {
+            res.push(cs[i]);
+            i += 1;
+            continue;
+        }
+        res.push_str(name);
+        let j = i + name.char_count();
+        let v = StrBuf::new();
+        while j < n && cs[j] != '"' {
+            v.push(cs[j]);
+            j += 1;
+        }
+        let val = v.to_str();
+        if name == "data-root=\"" {
+            // search.js joins page paths to it.
+            let r = url::resolve(dir, val);
+            res.push_str(if r == "/" { r } else { r + "/" });
+        } else {
+            res.push_str(url::site_href(dir, layout::own(site, val)));
+        }
+        res.push('"');
+        i = if j < n { j + 1 } else { j };
+    }
+    res.to_str()
+}
+
+/// Broken internal `href` / `src` targets (missing file or anchor).
+pub fn check(files: Dict<str, str>, statics: Set<str>) -> List<str> {
+    let ids: Dict<str, Set<str>> = Dict::new();
+    let refs: Dict<str, List<str>> = Dict::new();
+    for out in files.keys() {
+        let cs = chars_of(files[out]);
+        let s: Set<str> = Set::new();
+        for id in attr_values(cs, "id") { s.insert(id); }
+        ids.insert(out, s);
+        let r = attr_values(cs, "href");
+        r.extend(attr_values(cs, "src"));
+        refs.insert(out, r);
+    }
+    let bad: List<str> = List::new();
+    for out in files.keys() {
+        for href in refs[out] {
+            if href.contains("://") || href.starts_with("mailto:") || href == "#" { continue; }
+            let path = href;
+            let frag = "";
+            if let k: usize = href.find("#") {
+                path = href[:k];
+                frag = href[k + 1:];
+            }
+            // An asset's `?v=`.
+            path = url::split_ref(path).0;
+            let target = if path.is_empty() { out } else { norm(join(dir_of(out), path)) };
+            // Another version's docs (the banner, the version menu).
+            if target.starts_with("../") { continue; }
+            if let s: Set<str> = ids.get(target) {
+                if !frag.is_empty() && !s.contains(frag) { bad.push(f"{out}: {href} (no anchor)"); }
+            } else if !statics.contains(target) {
+                bad.push(f"{out}: {href} (no page)");
+            }
+        }
+    }
+    bad
+}
+
+/// Static files referenced by a relative path from the pages written
+/// under `root` (after site_hrefs, so the served HTML).
+pub fn relative_assets(root: str) throws -> List<str> {
+    let bad: List<str> = List::new();
+    try for e in fs::walk(root) {
+        let p = e.path().as_str();
+        if !e.is_file() || !p.ends_with(".html") { continue; }
+        let html = try fs::read_to_str(p);
+        // After any white space, not just the space site_hrefs looks for.
+        for a in ["href=\"", "src=\""] {
+            let rest = html;
+            loop {
+                let k = rest.find(a) ?? rest.len();
+                if k == rest.len() { break; }
+                let ws = k > 0 && rest[k - 1:k].trim().is_empty();
+                rest = rest[k + a.len():];
+                let v = rest[:rest.find("\"") ?? rest.len()];
+                if ws && url::relative_asset(v) { bad.push(f"{p[root.len() + 1:]}: {v} (relative asset path)"); }
+            }
+        }
+    }
+    bad
+}
+
+/// `html` of page `out` with each `error[E...]` / `warning[E...]` inside a
+/// `<pre>` linked to its page (the Korean one on a Korean page), for the
+/// codes in `codes`.
+pub fn link_codes(html: str, out: str, codes: Set<str>) -> str {
+    if codes.len() == 0 || !html.contains("[E") { return html; }
+    let pre = if out.starts_with("ko/") { "ko/" } else { "" };
+    let res = StrBuf::new();
+    let rest = html;
+    loop {
+        let a = rest.find("<pre") ?? rest.len();
+        res.push_str(rest[:a]);
+        rest = rest[a:];
+        if rest.is_empty() { break; }
+        let b = if let e: usize = rest.find("</pre>") { e + 6 } else { rest.len() };
+        res.push_str(link_codes_in(rest[:b], |c| if codes.contains(c) && out != pre + "errors/" + c + ".html" { rel(out, pre + "errors/" + c + ".html") } else { "" }));
+        rest = rest[b:];
+    }
+    res.to_str()
+}
+
+/// `s` with each `error[E...]` / `warning[E...]` whose code `to` maps to
+/// an href linked there.
+pub fn link_codes_in(s: str, to: fn(str) -> str) -> str {
+    let res = StrBuf::new();
+    let rest = s;
+    loop {
+        let k = rest.find("[E") ?? rest.len();
+        if k == rest.len() {
+            res.push_str(rest);
+            break;
+        }
+        let w = if rest[:k].ends_with("error") { 5usize } else if rest[:k].ends_with("warning") { 7usize } else { 0usize };
+        let close = rest[k:].find("]") ?? 0;
+        let code = if close > 2 && close < 8 { rest[k + 1:k + close] } else { "" };
+        let href = if w == 0 || code.is_empty() { "" } else { to(code) };
+        if href.is_empty() {
+            res.push_str(rest[:k + 2]);
+            rest = rest[k + 2:];
+            continue;
+        }
+        res.push_str(rest[:k - w]);
+        res.push_str(f"<a class=\"ecode\" href=\"{href}\">{rest[k - w:k + close + 1]}</a>");
+        rest = rest[k + close + 1:];
+    }
+    res.to_str()
+}
+
+/// `html` of Korean page `out` with links to Korean pages that do not
+/// exist (`outs` has them all), such as the API's or the logo, or to a
+/// section a Korean page does not have (`ids`: each page's ids), pointed
+/// at the English ones.
+pub fn ko_links(html: str, out: str, outs: Set<str>, ids: Dict<str, Set<str>>) -> str {
+    ko_attr(ko_attr(html, out, outs, ids, " href=\""), out, outs, ids, " src=\"")
+}
+
+fn ko_attr(html: str, out: str, outs: Set<str>, ids: Dict<str, Set<str>>, pat: str) -> str {
+    let res = StrBuf::new();
+    let rest = html;
+    loop {
+        let k = rest.find(pat) ?? rest.len();
+        if k == rest.len() {
+            res.push_str(rest);
+            break;
+        }
+        res.push_str(rest[:k + pat.len()]);
+        rest = rest[k + pat.len():];
+        let e = rest.find("\"") ?? rest.len();
+        let v = rest[:e];
+        rest = rest[e:];
+        if v.contains("://") || v.starts_with("#") || v.starts_with("mailto:") || v.is_empty() {
+            res.push_str(v);
+            continue;
+        }
+        let (path, frag) = if let i: usize = v.find("#") { (v[:i], v[i:]) } else { (v, "") };
+        let target = norm(join(dir_of(out), path));
+        let plain = target.strip_prefix("ko/") ?? "";
+        // A section of the English text (an untranslated page's link) that
+        // the Korean page names otherwise: the English page.
+        let id = if frag.len() > 1 { frag[1:] } else { "" };
+        let lacks = !id.is_empty() && !((ids.get(target) ?? Set::new()).contains(id)) && (ids.get(plain) ?? Set::new()).contains(id);
+        if !plain.is_empty() && ((!outs.contains(target) && (outs.contains(plain) || !plain.ends_with(".html"))) || lacks) {
+            res.push_str(rel(out, plain) + frag);
+        } else {
+            res.push_str(v);
+        }
+    }
+    res.to_str()
+}
+
+/// `frags` with every `error[E...]` in a terminal or output block linked
+/// to its page (the error pages among `own`), and a Korean page's links
+/// into pages that exist only in English (the API, the logo) pointed there.
+pub fn fix(frags: Dict<str, Frag>, own: List<Page>) {
+    let codes: Set<str> = Set::new();
+    for p in own {
+        if p.dir == "errors" && p.src != "errors/README.md" { codes.insert(p.out["errors/".len():p.out.len() - ".html".len()]); }
+    }
+    let outs: Set<str> = Set::new();
+    let ids: Dict<str, Set<str>> = Dict::new();
+    for o in frags.keys() {
+        outs.insert(o);
+        let set: Set<str> = Set::new();
+        for id in attr_values(chars_of(frags[o].body), "id") { set.insert(id); }
+        ids.insert(o, set);
+    }
+    for o in outs {
+        let f = frags[o];
+        f.body = link_codes(f.body, o, codes);
+        if o.starts_with("ko/") {
+            f.body = ko_links(f.body, o, outs, ids);
+            f.side = ko_links(f.side, o, outs, ids);
+        }
+        frags.insert(o, f);
+    }
+}
+
+#[test]
+fn error_codes_link() {
+    let codes: Set<str> = Set::new();
+    codes.insert("E200");
+    let h = link_codes("<p>error[E200]</p><pre>error[E200]: x\nwarning[E999]: y</pre>", "ko/learn/02-x.html", codes);
+    assert(h.starts_with("<p>error[E200]</p>"), "prose untouched");
+    assert(h.contains("<a class=\"ecode\" href=\"../errors/E200.html\">error[E200]</a>: x") && h.contains("warning[E999]: y"), h);
+}
+
+#[test]
+fn korean_links() {
+    let outs: Set<str> = Set::new();
+    for o in ["ko/learn/a.html", "learn/a.html", "std/index.html", "spec/x.html", "ko/spec/x.html"] { outs.insert(o); }
+    let ids: Dict<str, Set<str>> = Dict::new();
+    let en: Set<str> = Set::new();
+    en.insert("intro");
+    ids.insert("spec/x.html", en);
+    let h = ko_links("<a href=\"../std/index.html\">a</a><a href=\"a.html\">b</a><a href=\"../spec/x.html#intro\">c</a><img src=\"../../logo.svg\">", "ko/learn/a.html", outs, ids);
+    assert(h.contains("href=\"../../std/index.html\"") && h.contains("href=\"a.html\""), h);
+    assert(h.contains("href=\"../../spec/x.html#intro\"") && h.contains("src=\"../../logo.svg\""), h);
+}

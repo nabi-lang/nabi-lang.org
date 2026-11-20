@@ -1,0 +1,151 @@
+// The docs' own pages (nabi-lang/docs): the guide, the examples and the
+// error codes, in English and Korean, and the docs home.
+
+use pkg::layout;
+use pkg::spec::{sort_sources, twin};
+use pkg::{Frag, Page, Site, docs_branch, edit_url, hreflang, updated};
+use std::fs;
+use web::build::{between, dir_of};
+use web::chrome;
+
+/// The edit link of docs page `p` (docs/), whose source is under `dir`
+/// (`""`, or `ko/` for a Korean page).
+pub fn edit(site: Site, p: Page, dir: str, upd: Dict<str, str>) -> str {
+    let path = dir + p.src.replace("README.md", "index.md");
+    layout::edit_link(edit_url(site, site.repo, docs_branch(site), path), upd.get(path) ?? "", dir == "ko/")
+}
+
+/// `<docs>/**.md`, sorted (each directory's `index.md` first); the
+/// repository's own files are not pages.
+pub fn sources(root: str) throws -> List<str> {
+    let srcs: List<str> = List::new();
+    try for e in fs::walk(root) {
+        let p = e.path().as_str()[root.len() + 1:];
+        if !e.is_file() || !p.ends_with(".md") || p.starts_with(".") || p.starts_with("ko/") { continue; }
+        if p == "README.md" || p == "CODE_OF_CONDUCT.md" || p == "SECURITY.md" || p == "CONTRIBUTING.md" { continue; }
+        srcs.push(p);
+    }
+    for k in 0..srcs.len() { srcs[k] = srcs[k].replace("index.md", "README.md"); }
+    sort_sources(srcs);
+    for k in 0..srcs.len() { srcs[k] = srcs[k].replace("README.md", "index.md"); }
+    srcs
+}
+
+/// The docs home (docs/index.md, raw HTML) as this site shows it: its
+/// install command in the landing page's command box, its section cards
+/// as one plain list in header order, each section by its one name.
+pub fn home(html: str, ko: bool) -> str {
+    let h = html;
+    // The block layout::md made of it: `<div class="code cb">...</div></div>`.
+    let i = h.find("<div class=\"install\">") ?? h.len();
+    if let (cmd, _): (str, usize) = between(h, i, "<pre><code", "</code></pre>") {
+        let a = (h[i:].find("<div class=\"code cb") ?? 0) + i;
+        let e = (h[a:].find("</div></div>") ?? 0) + a + "</div></div>".len();
+        let text = markdown::strip_tags(cmd[(cmd.find(">") ?? 0) + 1:]).replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'");
+        if a > i && e > a { h = h[:a] + f"<div class=\"line mono\"><code>{markdown::esc(text)}</code>{chrome::copy_button(text, ko)}</div>" + h[e:]; }
+    }
+    let a = h.find("<div class=\"cards\">") ?? return h;
+    let e = (h[a:].find("</div>") ?? return h) + a;
+    let cards = h[a:e];
+    // (order, name, href, text)
+    let rows: List<(usize, str, str, str)> = List::new();
+    let at = 0usize;
+    loop {
+        let (href, k) = between(cards, at, "<a class=\"card\" href=\"", "\"") ?? break;
+        let (title, k2) = between(cards, k, "<h3>", "</h3>") ?? break;
+        let (text, k3) = between(cards, k2, "<p>", "</p>") ?? break;
+        at = k3;
+        let target = href.replace("../", "");
+        // The Korean home's API card goes to the Korean API pages.
+        if ko && target.starts_with("std/") { href = target; }
+        let (_, en, kr, index) = layout::section(target);
+        let order = 100usize;
+        for i in 0..layout::SECTIONS.len() {
+            if layout::SECTIONS[i].3 == target { order = i * 2; }
+        }
+        if target == "spec/refs-standard-libraries/index.html" { order = 7; }
+        let name = if index == target { layout::tr(ko, en, kr) } else { markdown::strip_tags(title) };
+        rows.push((order, name, href, text));
+    }
+    if rows.len() == 0 { return h; }
+    rows.sort_by(|x, y| x.0.cmp(y.0));
+    let list = StrBuf::new();
+    list.push_str("<dl class=\"sections\">");
+    for (_, name, href, text) in rows { list.push_str(f"<dt><a href=\"{href}\">{name}</a></dt><dd>{text}</dd>"); }
+    list.push_str("</dl>");
+    h[:a] + list.to_str() + h[e + "</div>".len():]
+}
+
+/// The docs' own pages: `docs/x.md` -> `x.html`, and their Korean
+/// editions under `ko/` (docs/ko/), a page not translated yet as its
+/// English text under a note; with the Korean pages that are translated.
+pub fn pages(site: Site) throws -> (List<Page>, List<Page>, Set<str>) {
+    let own: List<Page> = List::new();
+    for src in try sources(site.docs) {
+        let doc = layout::md(try fs::read_to_str(site.docs + "/" + src), |h| h, false);
+        let key = src.replace("index.md", "README.md");
+        own.push(Page { src: key, out: src.replace(".md", ".html"), dir: dir_of(src), title: doc.title, html: doc.html, heads: doc.headings });
+    }
+    let ko_dir = site.docs + "/ko";
+    let ko_own: List<Page> = List::new();
+    let translated: Set<str> = Set::new();
+    for p in own {
+        let file = ko_dir + "/" + p.src.replace("README.md", "index.md");
+        if fs::exists(file) {
+            let doc = layout::md(try fs::read_to_str(file), |h| h, true);
+            ko_own.push(Page { src: p.src, out: "ko/" + p.out, dir: p.dir, title: if doc.title.is_empty() { p.title } else { doc.title }, html: doc.html, heads: doc.headings });
+            translated.insert("ko/" + p.out);
+        } else {
+            let note = "<p class=\"tr-note\">이 페이지는 아직 번역되지 않았습니다. 영어 원문을 그대로 보여 줍니다.</p>\n";
+            ko_own.push(Page { src: p.src, out: "ko/" + p.out, dir: p.dir, title: p.title, html: note + "<div lang=\"en\">\n" + p.html + "</div>\n", heads: p.heads });
+        }
+    }
+    if fs::exists(ko_dir) {
+        for src in try sources(ko_dir) {
+            if !fs::exists(site.docs + "/" + src) { eprintln(f"note: docs/ko/{src} has no English page, so it is not built"); }
+        }
+    }
+    (own, ko_own, translated)
+}
+
+/// The docs' own pages (guide::pages) as fragments into `out`: a page at
+/// the top has its own outline, a directory (`learn/`) is a chapter with
+/// its own sidebar and pager.
+pub fn frags(site: Site, own: List<Page>, ko_own: List<Page>, translated: Set<str>, out: Dict<str, Frag>) {
+    let upd = updated(site.docs);
+    for (group_all, others, ko) in [(own, ko_own, false), (ko_own, own, true)] {
+        for k in 0..group_all.len() {
+            let p = group_all[k];
+            let (alt, sec) = twin(p, others);
+            let real = !ko || translated.contains(p.out);
+            let alt_real = ko || translated.contains(alt);
+            let head = if real && alt_real && !alt.is_empty() { hreflang(site, if ko { alt } else { p.out }, if ko { p.out } else { alt }) } else { "" };
+            let link = edit(site, p, if ko && real { "ko/" } else { "" }, upd);
+            if p.dir.is_empty() {
+                let side = if p.src == "README.md" { "" } else { layout::page_toc(p) };
+                let toc = if p.src == "README.md" { "" } else { layout::toc(p) };
+                let body = if p.src == "README.md" { home(p.html, ko) } else { p.html };
+                out.insert(p.out, Frag { out: p.out, title: p.title, side: side, toc: toc, body: body + link, pager: "", head: head, alt: alt, sec: sec, noindex: !real });
+                continue;
+            }
+            let group: List<Page> = List::new();
+            let at = 0usize;
+            for q in group_all {
+                if q.dir == p.dir {
+                    if q.out == p.out { at = group.len(); }
+                    group.push(q);
+                }
+            }
+            let html = if p.dir == "learn" { layout::chapter(p.html, p.title) } else { p.html };
+            // The errors index lists its codes itself.
+            let body = (if at == 0 && p.dir != "errors" { html + layout::contents(group) } else { html }) + link;
+            out.insert(p.out, Frag { out: p.out, title: p.title, side: layout::sidebar(group, at), toc: layout::toc(p), body: body, pager: layout::pager(group, at, ko), head: head, alt: alt, sec: sec, noindex: !real });
+        }
+    }
+}
+
+#[test]
+fn home_sections() {
+    let h = home("<div class=\"cards\"><a class=\"card\" href=\"std/index.html\"><span class=\"tag\">api/</span><h3>API</h3><p>Every module.</p></a><a class=\"card\" href=\"learn/index.html\"><h3>Learn Nabi</h3><p>Chapters.</p></a></div>", false);
+    assert(h == "<dl class=\"sections\"><dt><a href=\"learn/index.html\">Guide</a></dt><dd>Chapters.</dd><dt><a href=\"std/index.html\">Std library</a></dt><dd>Every module.</dd></dl>", h);
+}

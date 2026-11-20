@@ -1,0 +1,81 @@
+// A version directory as written: its pages, 404 pages, search indexes,
+// llms.txt and the static files (the kit's, its fonts and static/).
+
+use pkg::Site;
+use pkg::layout;
+use pkg::links::site_hrefs;
+use pkg::llms;
+use std::fs;
+use web::build::{dir_of, write};
+use web::kit;
+
+/// The pages of one version directory `dir` (`latest`, `0.1.0`, `dev`)
+/// under `docs_root`, linking within it, with its 404 page, search indexes
+/// (`text`: the body-text ones, English and Korean) and static files; the
+/// static names.
+pub fn write_version(site: Site, docs_root: str, dir: str, files: Dict<str, str>, search: str, search_ko: str, text: (str, str), llm: (str, str)) throws -> Set<str> {
+    let vdir = docs_root + "/" + dir;
+    if fs::exists(vdir) { try fs::remove_dir_all(vdir); }
+    let base = "/" + dir;
+    for out in files.keys() { try write(vdir, out, site_hrefs(site, files[out], base, out)); }
+    try write(vdir, "404.html", site_hrefs(site, layout::not_found_page(site, dir, false), base, "404.html"));
+    try write(vdir, "ko/404.html", site_hrefs(site, layout::not_found_page(site, dir, true), base, "ko/404.html"));
+    try write(vdir, "search-index.json", search);
+    let statics = try copy_static(vdir);
+    statics.insert("search-index.json");
+    if !text.0.is_empty() {
+        try write(vdir, "search-text.json", text.0);
+        statics.insert("search-text.json");
+    }
+    if !text.1.is_empty() {
+        try write(vdir, "ko/search-text.json", text.1);
+        statics.insert("ko/search-text.json");
+    }
+    if !llm.0.is_empty() {
+        let at = site.docs_url + "/" + dir;
+        try write(vdir, "llms.txt", llm.0.replace(llms::BASE, at));
+        try write(vdir, "llms-full.txt", llm.1.replace(llms::BASE, at));
+    }
+    if !search_ko.is_empty() {
+        try write(vdir, "ko/search-index.json", search_ko);
+        statics.insert("ko/search-index.json");
+    }
+    statics
+}
+
+/// The names under static/, of the kit's files and of its fonts, without
+/// copying (for the link check).
+pub fn static_names() throws -> Set<str> {
+    let names: Set<str> = Set::new();
+    for f in kit::files() { names.insert(f.name); }
+    try for e in fs::walk(kit::FONTS_DIR) {
+        let name = e.path().as_str()[kit::FONTS_DIR.len() + 1:].replace("\\", "/");
+        if e.is_file() && !name.ends_with(".md") { names.insert("fonts/" + name); }
+    }
+    try for e in fs::walk("static") {
+        let name = e.path().as_str()["static/".len():];
+        if e.is_file() && !kit::is_source(name) { names.insert(name); }
+    }
+    names
+}
+
+/// Writes the kit's files (web/, built in), copies its fonts to fonts/
+/// and static/ into `dir`; the names written.
+pub fn copy_static(dir: str) throws -> Set<str> {
+    let names: Set<str> = Set::new();
+    try fs::create_dir_all(dir);
+    for f in kit::files() {
+        try fs::write(dir + "/" + f.name, f.data);
+        names.insert(f.name);
+    }
+    for name in try kit::copy_fonts(kit::FONTS_DIR, dir + "/fonts") { names.insert("fonts/" + name); }
+    try for e in fs::walk("static") {
+        if !e.is_file() { continue; }
+        let name = e.path().as_str()["static/".len():];
+        if kit::is_source(name) { continue; }
+        try fs::create_dir_all(dir_of(dir + "/" + name));
+        try fs::copy(e.path(), dir + "/" + name);
+        names.insert(name);
+    }
+    names
+}

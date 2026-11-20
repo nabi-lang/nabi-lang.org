@@ -1,0 +1,123 @@
+// Code checks for the site's pages, by the rules of the web kit's
+// `snippets` (`nabi`, `nabi build`, `nabi norun`, ```output); the
+// landing page's programs against their checked-in output.
+
+use pkg::guide;
+use pkg::home;
+use pkg::load_site;
+use snippets::Snippet;
+use std::env;
+use std::fs;
+use std::process::{Command, Stdio};
+
+/// What `nabi run` prints for the landing page's program home/<name>/.
+fn home_run(name: str) throws -> str {
+    let nabi = try env::var("NABI") catch _ { "nabi" };
+    let dir = f"home/{name}";
+    let out = try Command::new(nabi).args(["run"]).current_dir(dir).stdin(Stdio::Null).output();
+    if fs::exists(dir + "/target") { try fs::remove_dir_all(dir + "/target"); }
+    let text = ((try? str::from_utf8(out.stderr)) ?? "") + ((try? str::from_utf8(out.stdout)) ?? "");
+    text.trim_end() + "\n"
+}
+
+/// The landing page's programs whose checked-in output (home/<name>.out)
+/// is no longer what `nabi run` prints; with `write`, rewritten instead.
+pub fn home_check(write: bool) throws -> List<str> {
+    let bad: List<str> = List::new();
+    for smp in home::SAMPLES {
+        let got = try home_run(smp.name);
+        if got == smp.out { continue; }
+        if write {
+            try fs::write(f"home/{smp.name}.out", got);
+            println(f"home/{smp.name}.out rewritten");
+        } else {
+            bad.push(f"home/{smp.name}.out differs from what `nabi run` prints now; rerun `nabi run -- home` and rebuild:\n{got}");
+        }
+    }
+    bad
+}
+
+/// The names `code` uses as a path root (`table::read_csv`, `use stats::{..}`)
+/// that are package checkouts in `dir`.
+fn used_packages(code: str, dir: str) -> List<str> {
+    let out: List<str> = List::new();
+    let w = StrBuf::new();
+    let prev = ' ';
+    let chars: List<char> = List::new();
+    for c in (code + " ").chars() { chars.push(c); }
+    for k in 0..chars.len() {
+        let c = chars[k];
+        if c.is_alphanumeric() || c == '_' {
+            if w.is_empty() && (prev == ':' || prev == '.') { prev = c; continue; }
+            w.push(c);
+            prev = c;
+            continue;
+        }
+        let name = w.to_str();
+        w = StrBuf::new();
+        prev = c;
+        // A capitalised name is a type, never a package (and file names
+        // may not tell case apart).
+        if name.is_empty() || out.contains(name) || name.chars().any(|ch: char| ch >= 'A' && ch <= 'Z') { continue; }
+        if c == ':' && k + 1 < chars.len() && chars[k + 1] == ':' && fs::exists(f"{dir}/{name}/nabi.nabion") { out.push(name); }
+    }
+    out
+}
+
+/// `code` with a `//! nabion` block of path dependencies on the package
+/// checkouts in `dir` it uses, when NABI_PACKAGES names that directory:
+/// how the official packages' examples run before the packages are on
+/// the registry. Without it, the toolchain adds them on first use.
+fn with_packages(code: str, dir: str) -> str {
+    if dir.is_empty() { return code; }
+    let used = used_packages(code, dir);
+    if used.len() == 0 || code.starts_with("//!") { return code; }
+    let deps = StrBuf::new();
+    for name in used { deps.push_str(f"//!         \"{name}\": Dep::path(\"{dir}/{name}\"),\n"); }
+    f"//! ```nabion\n//! Package {{\n//!     deps: {{\n{deps.to_str()}//!     }},\n//! }}\n//! ```\n{code}"
+}
+
+pub fn code_check(filter: str) throws -> List<str> {
+    let all: List<Snippet> = List::new();
+    let snips: List<Snippet> = List::new();
+    let paths: List<str> = List::new();
+    let site = try load_site();
+    for src in try guide::sources(site.docs) { paths.push(site.docs + "/" + src); }
+    if fs::exists(site.docs + "/ko") {
+        for src in try guide::sources(site.docs + "/ko") { paths.push(site.docs + "/ko/" + src); }
+    }
+    paths.push(site.www + "/index.md");
+    paths.push(site.www + "/download.md");
+    if fs::exists(site.www + "/ko/download.md") { paths.push(site.www + "/ko/download.md"); }
+    let pkgs = try env::var("NABI_PACKAGES") catch _ { "" };
+    for page in paths {
+        // ```text check= blocks are the content tool's.
+        for s in snippets::extract(page, try fs::read_to_str(page)) {
+            if s.mode == "diag" { continue; }
+            s.code = with_packages(s.code, pkgs);
+            all.push(s);
+            if page.contains(filter) { snips.push(s); }
+        }
+    }
+    let tool = try env::var("NABI") catch _ { "nabi" };
+    // Outside this package: `nabi run` looks upward for a package.
+    let bad = try snippets::check_all(tool, ".", env::temp_dir().as_str() + "/nabi-lang.org-snippets", snips, all);
+    let run = 0usize;
+    for s in snips {
+        if s.mode != "norun" { run += 1; }
+    }
+    for b in bad { eprint(f"code block: {b}"); }
+    println(f"{run} code blocks checked ({snips.len() - run} norun), {bad.len()} failing");
+    bad
+}
+
+#[test]
+fn finds_package_roots() {
+    let dir = env::temp_dir().as_str() + "/nabi-lang.org-pkgs-test";
+    try fs::create_dir_all(dir + "/stats") catch _ {};
+    try fs::write(dir + "/stats/nabi.nabion", "Package {}") catch _ {};
+    let used = used_packages("use stats::{mean};\nlet m = core::stats::x; let s = stats::std(xs); Stats::new();", dir);
+    assert(used.len() == 1 && used[0] == "stats", "one root, not after ::");
+    assert(with_packages("println(1);", dir) == "println(1);", "no package");
+    assert(with_packages("stats::mean(x)", dir).starts_with("//! ```nabion"), "header");
+}

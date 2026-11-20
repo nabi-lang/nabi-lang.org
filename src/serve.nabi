@@ -1,0 +1,649 @@
+// nabi-lang.org and docs.nabi-lang.org from content bundles.
+//
+// Bundles are <repo>/<branch>/<sha>.nabion, <repo>/<branch>/current names
+// the sha. Each release is archived once; dev and home are rebuilt around
+// the archives. A signed POST /_admin/reload starts a round, so does a
+// five-minute timer. GET /healthz reports what is served.
+//
+//   NABI_WEB_ADDR      listen address (127.0.0.1:8080)
+//   NABI_WEB_DATA      state: sources, archives, output
+//   NABI_WEB_CONTENT   bundle store: https:// base or directory
+//   NABI_WEB_NABI_GIT   nabi repository
+//   NABI_WEB_RELOAD_KEY  HMAC-SHA256 key for reload
+//   NABI_WEB_DOCS_HOST   docs host name
+//   NABI_WEB_TYPST       typst, which draws the docs' link preview cards
+//   NABI_WEB_OG_FONTS    the fonts og/card.typ asks for (Geist, Pretendard)
+//
+// Environment first, then .env in the working directory.
+
+use core::crypto::{Hmac, HashAlgorithm, constant_time_eq};
+use core::encoding;
+use core::time::Duration;
+use core::time::Instant;
+use std::env;
+use std::fs;
+use std::nabion;
+use std::net;
+use std::net::TcpStream;
+use std::process::{Command, Stdio};
+use std::thread;
+use web::http;
+use web::http::Request;
+use web::url;
+
+static STALE: Atomic<i32> = Atomic::new(1);
+static ACTIVE: Atomic<i32> = Atomic::new(0);
+static DRAWN: Atomic<i32> = Atomic::new(0);
+static FAILED: Atomic<i32> = Atomic::new(0);
+const MAX_FAILED: i32 = 3;
+const MAX_CONNS: i32 = 256;
+
+pub struct Cfg {
+    pub addr: str;
+    pub data: str;
+    pub content: str;
+    pub nabi_git: str;
+    pub reload_key: str;
+    pub docs_host: str;
+    pub typst: str;
+    pub og_fonts: str;
+}
+
+#[derive(Nabion)]
+pub struct Bundle {
+    pub repo: str;
+    pub branch: str;
+    pub sha: str;
+    pub toolchain: str;
+    pub files: Dict<str, str>;
+}
+
+pub fn parse_env(text: str) -> Dict<str, str> {
+    let out: Dict<str, str> = Dict::new();
+    for raw in text.split("\n") {
+        let l = raw.trim();
+        if l.is_empty() || l.starts_with("#") { continue; }
+        l = l.strip_prefix("export ") ?? l;
+        let (k, v) = l.split_once("=") ?? ("", "");
+        let key = k.trim();
+        if key.is_empty() { continue; }
+        let val = v.trim();
+        if val.len() >= 2 && ((val.starts_with("\"") && val.ends_with("\"")) || (val.starts_with("'") && val.ends_with("'"))) {
+            val = val[1:val.len() - 1];
+        }
+        out.insert(key, val);
+    }
+    out
+}
+
+fn setting(file: Dict<str, str>, k: str, dflt: str) -> str {
+    try env::var(k) catch _ { file.get(k) ?? dflt }
+}
+
+pub fn load_cfg(path: str) throws -> Cfg {
+    let f = parse_env(if fs::exists(path) { try fs::read_to_str(path) } else { "" });
+    let cfg = Cfg {
+        addr: setting(f, "NABI_WEB_ADDR", "127.0.0.1:8080"),
+        data: setting(f, "NABI_WEB_DATA", ""),
+        content: setting(f, "NABI_WEB_CONTENT", ""),
+        nabi_git: setting(f, "NABI_WEB_NABI_GIT", "https://github.com/nabi-lang/nabi.git"),
+        reload_key: setting(f, "NABI_WEB_RELOAD_KEY", ""),
+        docs_host: setting(f, "NABI_WEB_DOCS_HOST", "docs.nabi-lang.org"),
+        typst: setting(f, "NABI_WEB_TYPST", "/opt/nabi-og/typst"),
+        og_fonts: setting(f, "NABI_WEB_OG_FONTS", "/opt/nabi-og/fonts"),
+    };
+    for (k, v) in [("NABI_WEB_DATA", cfg.data), ("NABI_WEB_CONTENT", cfg.content)] {
+        if v.is_empty() { throw ValueError::new(f"{k} is not set (environment or .env)"); }
+    }
+    cfg
+}
+
+fn sh(script: str) throws -> str {
+    let out = try Command::new("sh").args(["-c", script]).stdin(Stdio::Null).output();
+    if !out.status.success() { throw ValueError::new(f"`{script}` failed: {(try? str::from_utf8(out.stderr)) ?? ""}"); }
+    (try? str::from_utf8(out.stdout)) ?? ""
+}
+
+/// `'s'` for a shell.
+fn q(s: str) -> str { "'" + s.replace("'", "'\\''") + "'" }
+
+fn fetch(cfg: Cfg, key: str) throws -> str {
+    if cfg.content.starts_with("https://") || cfg.content.starts_with("http://") {
+        try sh(f"curl -fsSL --max-time 60 {q(cfg.content + "/" + key)}")
+    } else {
+        try fs::read_to_str(cfg.content + "/" + key)
+    }
+}
+
+/// What a bundle holds (2: with updated.nabion, each page's last commit
+/// date). Bumping it refetches every sha once.
+const BUNDLE_FORMAT: str = "2";
+
+/// Unpack `repo`@`branch` under data/src; true if the sha (or the bundle
+/// format) changed.
+fn sync_bundle(cfg: Cfg, repo: str, branch: str) throws -> bool {
+    let key = f"{repo}/{branch}";
+    let sha = (try fetch(cfg, key + "/current")).trim();
+    let mark = f"{cfg.data}/src/{key}.sha";
+    let seen = sha + " " + BUNDLE_FORMAT;
+    if fs::exists(mark) && (try fs::read_to_str(mark)).trim() == seen { return false; }
+    let b: Bundle = try nabion::from_str(try fetch(cfg, f"{key}/{sha}.nabion"));
+    let dir = f"{cfg.data}/src/{key}";
+    let tmp = dir + ".new";
+    if fs::exists(tmp) { try fs::remove_dir_all(tmp); }
+    for (path, text) in b.files.iter() {
+        if path.contains("..") { throw ValueError::new(f"{key}: bad path {path}"); }
+        try fs::create_dir_all(dir_of(tmp + "/" + path));
+        try fs::write(tmp + "/" + path, text);
+    }
+    if fs::exists(dir) { try fs::remove_dir_all(dir); }
+    try fs::rename(tmp, dir);
+    try fs::write(mark, seen + "\n");
+    eprintln(f"content {key} @ {short(sha)}");
+    true
+}
+
+fn short(sha: str) -> str { if sha.len() > 12 { sha[:12] } else { sha } }
+
+/// `s` up to its last `sep` ("a/b/c" -> "a/b"), or `none` without one.
+fn before_last(s: str, sep: str) -> str | none {
+    let parts: List<str> = List::new();
+    for x in s.split(sep) { parts.push(x); }
+    if parts.len() < 2 { return none; }
+    parts.pop();
+    parts.join(sep)
+}
+
+fn dir_of(p: str) -> str { before_last(p, "/") ?? "." }
+
+fn nabi_git(cfg: Cfg) throws -> str {
+    let git = cfg.data + "/nabi.git";
+    if !fs::exists(git) { _ = try sh(f"git clone -q --bare --filter=blob:none {q(cfg.nabi_git)} {q(git)}"); }
+    git
+}
+
+/// nabi's v* tags on the remote, tag -> commit.
+fn nabi_tags(cfg: Cfg) throws -> Dict<str, str> {
+    let git = try nabi_git(cfg);
+    let out: Dict<str, str> = Dict::new();
+    for line in (try sh(f"git -C {q(git)} ls-remote --tags origin 'refs/tags/v*'")).lines() {
+        let (sha, r) = line.trim().split_once("\t") ?? { continue; };
+        let name = r.strip_prefix("refs/tags/") ?? { continue; };
+        // An annotated tag's peeled line names the commit.
+        out.insert(name.strip_suffix("^{}") ?? name, sha);
+    }
+    out
+}
+
+/// library/, install scripts and CHANGELOG.md of nabi at `rev`, under
+/// data/src/nabi/<rev>; true if they changed. `want` is the tag's commit
+/// on the remote, so a moved tag is read again.
+fn sync_library(cfg: Cfg, rev: str, want: str) throws -> bool {
+    let git = try nabi_git(cfg);
+    let dir = f"{cfg.data}/src/nabi/{rev}";
+    let mark = dir + ".sha";
+    let is_tag = rev != "main";
+    if is_tag && fs::exists(mark) && (try fs::read_to_str(mark)).trim() == want { return false; }
+    if is_tag {
+        // `+`: a moved tag replaces the one fetched before.
+        _ = try sh(f"git -C {q(git)} fetch -q origin {q("+refs/tags/" + rev + ":refs/tags/" + rev)}");
+    } else {
+        // No tags: a tag that follows main here could be stale.
+        _ = try sh(f"git -C {q(git)} fetch -q --no-tags origin +refs/heads/main:refs/heads/main");
+    }
+    let sha = (try sh(f"git -C {q(git)} rev-parse {q(rev + "^{commit}")}")).trim();
+    if fs::exists(mark) && (try fs::read_to_str(mark)).trim() == sha { return false; }
+    if fs::exists(dir) { try fs::remove_dir_all(dir); }
+    try fs::create_dir_all(dir);
+    let extra = if is_tag { "" } else { " CHANGELOG.md" };
+    _ = try sh(f"git -C {q(git)} archive {q(sha)} library install.sh install.ps1{extra} | tar -x -C {q(dir)}");
+    try fs::write(mark, sha + "\n");
+    eprintln(f"library {rev} @ {short(sha)}");
+    true
+}
+
+/// The releases, newest first: x.y.z with a vx.y.z branch in both docs
+/// and spec. bundle-content.sh lists each repo's in <repo>/branches.
+fn releases(cfg: Cfg) throws -> List<str> {
+    let spec: Set<str> = Set::new();
+    for b in (try fetch(cfg, "spec/branches")).lines() { spec.insert(b.trim()); }
+    let out: List<str> = List::new();
+    for line in (try fetch(cfg, "docs/branches")).lines() {
+        let b = line.trim();
+        if b.starts_with("v") && spec.contains(b) && release_rank(b[1:]) >= 0 { out.push(b[1:]); }
+    }
+    out.sort_by(|x, y| release_rank(y).cmp(release_rank(x)));
+    out
+}
+
+/// "0.1.12" -> 1000012, so newer is larger; -1 unless it is x.y.z.
+fn release_rank(v: str) -> i64 {
+    let r = 0i64;
+    let n = 0;
+    for p in v.split(".") {
+        let x = try p.parse::<i64>() catch _ { return -1; };
+        if x < 0 || x >= 1000000 { return -1; }
+        r = r * 1000000 + x;
+        n += 1;
+    }
+    if n == 3 { r } else { -1 }
+}
+
+/// "0.1.4" -> "0.1".
+fn minor_of(v: str) -> str { before_last(v, ".") ?? v }
+
+fn run_self(exe: str, args: List<str>, envs: List<(str, str)>) throws {
+    let st = try Command::new(exe).args(args).envs(envs).status();
+    if !st.success() { throw ValueError::new(f"build {args.join(" ")}: {st}"); }
+}
+
+fn site_local(cfg: Cfg, docs: str, spec: str, library: str, extra: str) -> str {
+    let s = cfg.data + "/src";
+    f"{{\n    docs: \"{s}/docs/{docs}\",\n    www: \"{s}/www/main\",\n    spec: \"{s}/spec/{spec}/en\",\n    spec_ko: \"{s}/spec/{spec}/ko\",\n    library: \"{s}/nabi/{library}/library\",\n{extra}}}\n"
+}
+
+/// Fetch what changed, rebuild it, swap the output in. A new `build`
+/// (this program, site.nabion, static/ or the kit's fonts) re-archives
+/// every release.
+fn round(cfg: Cfg, exe: str, build: str) throws {
+    let t0 = Instant::now();
+    let changed: Set<str> = Set::new();
+    let mark = cfg.data + "/build";
+    let fresh = !fs::exists(mark) || (try fs::read_to_str(mark)).trim() != build;
+    if fresh {
+        if fs::exists(cfg.data + "/archive") { try fs::remove_dir_all(cfg.data + "/archive"); }
+        changed.insert("build");
+    }
+    for (repo, branch) in [("docs", "main"), ("www", "main"), ("spec", "main")] {
+        if try sync_bundle(cfg, repo, branch) { changed.insert(f"{repo}/{branch}"); }
+    }
+    if try sync_library(cfg, "main", "") { changed.insert("nabi/main"); }
+    // A docs and spec branch can come before its nabi tag: leave that
+    // release out until the tag is there.
+    let tags = try nabi_tags(cfg);
+    let rel: List<str> = List::new();
+    for v in try releases(cfg) {
+        if tags.contains_key("v" + v) { rel.push(v); } else { eprintln(f"round: {v} has no nabi tag v{v} yet, skipped"); }
+    }
+
+    let vl = StrBuf::new();
+    for v in rel { vl.push_str(f"\"{v}\", "); }
+    let versions = cfg.data + "/versions.nabion";
+    try fs::write(versions, f"Versions {{ released: [{vl.to_str()}] }}\n");
+
+    // Archive each release whose inputs changed.
+    let archive = cfg.data + "/archive";
+    for v in rel {
+        let tag = "v" + v;
+        let any = false;
+        if try sync_bundle(cfg, "docs", tag) { any = true; }
+        if try sync_bundle(cfg, "spec", tag) { any = true; }
+        if try sync_library(cfg, tag, tags["v" + v]) { any = true; }
+        if !any && fs::exists(f"{archive}/{v}/bundle.nabion") { continue; }
+        // Same-minor releases, oldest first, for "Added in".
+        let hist = StrBuf::new();
+        let older: List<str> = List::new();
+        for w in rel {
+            if w != v && minor_of(w) == minor_of(v) && !older.contains(w) { older.push(w); }
+        }
+        older.reverse();
+        for w in older {
+            _ = try sync_library(cfg, "v" + w, tags["v" + w]);
+            hist.push_str(f"{{ release: \"{w}\", library: \"{cfg.data}/src/nabi/v{w}/library\" }}, ");
+        }
+        let local = f"{cfg.data}/site.{v}.nabion";
+        try fs::write(local, site_local(cfg, tag, tag, tag, f"    spec_branch: \"{tag}\",\n    built_from: \"{v}\",\n    history: [{hist.to_str()}],\n"));
+        try fs::create_dir_all(f"{archive}/{v}");
+        try run_self(exe, ["archive", v, f"{archive}/{v}"], [("NABI_SITE_LOCAL", local), ("NABI_VERSIONS", versions)]);
+        changed.insert(tag);
+    }
+
+    let out = cfg.data + "/out";
+    if changed.is_empty() && fs::exists(out) {
+        eprintln(f"round: nothing changed ({t0.elapsed():?})");
+        return;
+    }
+    let next = cfg.data + "/out.next";
+    if fs::exists(next) { try fs::remove_dir_all(next); }
+    let local = cfg.data + "/site.dev.nabion";
+    try fs::write(local, site_local(cfg, "main", "main", "main", f"    out: \"{next}\",\n"));
+    try run_self(exe, [], [("NABI_SITE_LOCAL", local), ("NABI_VERSIONS", versions), ("NABI_DOCS_ARCHIVE", archive)]);
+    let old = cfg.data + "/out.old";
+    if fs::exists(old) { try fs::remove_dir_all(old); }
+    if fs::exists(out) { try fs::rename(out, old); }
+    try fs::rename(next, out);
+    if fresh { try fs::write(mark, build + "\n"); }
+    eprintln(f"round: rebuilt {changed.len()} source(s) ({t0.elapsed():?})");
+}
+
+fn rebuild_loop(cfg: Cfg) {
+    let exe = try env::current_exe() catch e {
+        eprintln(f"cannot find this program to rebuild the site: {e}");
+        return;
+    };
+    let build = try sh(f"cat {q(exe.as_str())} site.nabion $(find static web/assets/fonts -type f 2>/dev/null | sort) | sha256sum | cut -c1-16") catch e {
+        eprintln(f"cannot fingerprint this build: {e}");
+        return;
+    };
+    let idle = 0;
+    loop {
+        if STALE.swap(0) == 1 || idle >= 300 {
+            idle = 0;
+            try {
+                round(cfg, exe.as_str(), build.trim());
+                FAILED.store(0);
+            } catch e {
+                eprintln(f"round: {e}");
+                FAILED.fetch_add(1);
+            };
+        }
+        thread::sleep(Duration::secs(1));
+        idle += 1;
+    }
+}
+
+pub fn signature(key: str, body: str) -> str {
+    encoding::hex::encode(Hmac::mac(HashAlgorithm::Sha256, key, body))
+}
+
+/// Newest built release of minor `m`, or none.
+fn newest_of(docs: str, m: str) -> str | none {
+    let best: str | none = none;
+    let best_patch = -1;
+    for entry in (try fs::read_dir(docs) catch _ { return none; }).results() {
+        let e = try entry.get() catch _ { continue; };
+        let name = e.file_name();
+        if !name.starts_with(m + ".") { continue; }
+        let p = try name[m.len() + 1:].parse::<i32>() catch _ { continue; };
+        if p > best_patch {
+            best_patch = p;
+            best = name;
+        }
+    }
+    best
+}
+
+pub struct Resp {
+    pub status: i32;
+    pub headers: List<str>;
+    pub body: str;
+    pub file: str;
+}
+
+fn text(status: i32, body: str) -> Resp { Resp { status: status, headers: ["Content-Type: text/plain; charset=utf-8", "Cache-Control: no-store"], body: body + "\n", file: "" } }
+
+fn page(f: str, path: str, query: str, docs: bool) -> Resp { Resp { status: 200, headers: [f"Content-Type: {http::content_type(f)}", "Cache-Control: " + cache_for(f, path, query, docs)], body: "", file: f } }
+
+const FOREVER: str = "public, max-age=31536000, immutable";
+
+/// This server is the one place that says how long a response keeps
+/// (the proxy in front adds none). A file asked for by its current
+/// version (`?v=`, layout::asset and the og images) never changes: cache
+/// it for good. Pages of a released version (`/0.1.2/...`) and the fonts
+/// (the kit's, unversioned names) keep a day; pages of latest/, dev/ and
+/// nabi-lang.org five minutes, as do the search indexes. A page or font
+/// past its time is still shown once while it is fetched again
+/// (stale-while-revalidate). Every file also carries an ETag (handle), so
+/// a stale copy revalidates for free.
+pub fn cache_for(f: str, path: str, query: str, docs: bool) -> str {
+    if f.ends_with(".html") {
+        let first = (path[1:].split_once("/") ?? (path[1:], "")).0;
+        let released = docs && first.split(".").count() == 3;
+        return if released { "public, max-age=86400, stale-while-revalidate=604800" } else { "public, max-age=300, stale-while-revalidate=86400" };
+    }
+    if f.contains("/fonts/") { return "public, max-age=86400, stale-while-revalidate=2592000"; }
+    let v = query_v(query);
+    if !v.is_empty() && v == (try pkg::og_version(f) catch _ { "" }) { return FOREVER; }
+    if f.ends_with(".json") { "public, max-age=300" } else { "public, max-age=3600" }
+}
+
+/// The `v` parameter of a query string, or "".
+pub fn query_v(query: str) -> str {
+    for kv in query.split("&") {
+        if let v: str = kv.strip_prefix("v=") { return v; }
+    }
+    ""
+}
+
+/// Where a non-canonical request path goes (web's url::canonical), or
+/// none: `/a.html`, `/a/index`, `/a/` to `/a`; the docs root to `/latest`.
+pub fn redirect(path: str, docs: bool) -> str | none {
+    let c = url::canonical(path) ?? path;
+    if docs && c == "/" { c = "/latest"; }
+    if c == path { none } else { c }
+}
+
+fn route(cfg: Cfg, r: Request) -> Resp {
+    if r.path == "/_admin/reload" {
+        if r.method != "POST" { return text(405, "POST only"); }
+        if cfg.reload_key.is_empty() || !constant_time_eq(signature(cfg.reload_key, r.body), r.header("x-nabi-signature")) {
+            return text(401, "bad signature");
+        }
+        STALE.store(1);
+        return text(202, "reloading");
+    }
+    if r.path == http::REPORT_PATH {
+        if r.method != "POST" { return text(405, "POST only"); }
+        if let line: str = http::csp_report(r.body) { eprintln(line); }
+        return Resp { status: 204, headers: ["Cache-Control: no-store"], body: "", file: "" };
+    }
+    if r.method != "GET" && r.method != "HEAD" { return text(405, "GET only"); }
+    if r.path == "/healthz" { return health(cfg); }
+    if r.path == http::SPECULATION_PATH {
+        return Resp { status: 200, headers: [http::SPECULATION_TYPE, "Cache-Control: public, max-age=3600"], body: http::SPECULATION_RULES, file: "" };
+    }
+    let host = (r.header("host").split_once(":") ?? (r.header("host"), "")).0;
+    let docs = host == cfg.docs_host || host.starts_with("docs.");
+    let root = cfg.data + "/out/" + if docs { "docs" } else { "www" };
+    if let to: str = redirect(r.path, docs) {
+        return Resp { status: 301, headers: [url::moved(to, r.query), "Cache-Control: public, max-age=3600"], body: "", file: "" };
+    }
+    let p = r.path;
+    // /0.1/... is the newest built 0.1.x.
+    if docs {
+        let first = (p[1:].split_once("/") ?? (p[1:], "")).0;
+        if first.split(".").count() == 2 && !fs::exists(root + "/" + first) {
+            if let v: str = newest_of(root, first) { p = "/" + v + p[1 + first.len():]; }
+        }
+    }
+    // A page's card, /<version>/og/<page>.png on the docs and
+    // /og/<page>.png on nabi-lang.org: drawn when first asked for, else the
+    // site's.
+    if p.ends_with(".png") {
+        let (ver, rest) = if docs { p[1:].split_once("/") ?? ("", "") } else { (".", p[1:]) };
+        if let name: str = rest.strip_prefix("og/") {
+            if let png: str = og_card(cfg, root, ver, name) {
+                let keep = if query_v(r.query).is_empty() { "public, max-age=86400" } else { FOREVER };
+                return Resp { status: 200, headers: ["Content-Type: image/png", "Cache-Control: " + keep], body: "", file: png };
+            }
+            let site = cfg.data + "/out/www/og.png";
+            if fs::exists(site) { return Resp { status: 200, headers: ["Content-Type: image/png", "Cache-Control: public, max-age=3600"], body: "", file: site }; }
+        }
+    }
+    // A page is <path>.html or <path>/index.html; anything else by its name.
+    if let f: str = http::page_file(root, p) { return page(f, r.path, r.query, docs); }
+    // A missing docs page under a version gets that version's 404 page.
+    let nf = root + "/404.html";
+    if docs {
+        let (first, rest) = p[1:].split_once("/") ?? ("", "");
+        if !first.is_empty() && !first.contains("..") && fs::exists(root + "/" + first + "/404.html") { nf = root + "/" + first + "/404.html"; }
+        // Under /<version>/ko/, the Korean one.
+        if (rest == "ko" || rest.starts_with("ko/")) && fs::exists(root + "/" + first + "/ko/404.html") { nf = root + "/" + first + "/ko/404.html"; }
+    }
+    if fs::exists(nf) { return Resp { status: 404, headers: ["Content-Type: text/html; charset=utf-8", "Cache-Control: no-store"], body: "", file: nf }; }
+    text(404, "not found")
+}
+
+/// The toolchain this was built with (./toolchain, written by the
+/// deploy), the release docs/latest serves and the failed rounds in a
+/// row; 503 once rounds keep failing or nothing is built yet.
+fn health(cfg: Cfg) -> Resp {
+    let tc = (try fs::read_to_str("toolchain") catch _ { "unknown" }).trim();
+    let latest = latest_of(try fs::read_to_str(cfg.data + "/out/docs/versions.json") catch _ { "" }) ?? "none";
+    let failed = FAILED.load();
+    let ok = failed < MAX_FAILED && fs::exists(cfg.data + "/out");
+    text(if ok { 200 } else { 503 }, f"{if ok { "ok" } else { "failing" }}\ntoolchain {tc}\nlatest {latest}\nfailed_rounds {failed}")
+}
+
+/// `latest` of versions.json.
+pub fn latest_of(json: str) -> str | none {
+    let (_, rest) = json.split_once("\"latest\":\"") ?? { return none; };
+    let (v, _) = rest.split_once("\"") ?? { return none; };
+    v
+}
+
+const WORDMARK: str = include_str!("../web/assets/brand/wordmark-dark.svg");
+
+/// Card `name` of docs version `ver` (out/docs/<ver>/og.nabion; `.` for
+/// nabi-lang.org's out/www/og.nabion), drawn by
+/// og/card.typ into data/og/<card version>.png the first time it is asked
+/// for; none without such a card or when typst fails.
+fn og_card(cfg: Cfg, root: str, ver: str, name: str) -> str | none {
+    if ver.is_empty() || ver.contains("/") || ver.contains("..") || name.contains("/") || name.contains("..") { return none; }
+    let text = try fs::read_to_str(f"{root}/{ver}/og.nabion") catch _ { return none; };
+    let all: pkg::layout::Cards = try nabion::from_str(text) catch _ { return none; };
+    for c in all.cards {
+        if c.name != name { continue; }
+        let png = f"{cfg.data}/og/{pkg::layout::card_version(c)}.png";
+        if fs::exists(png) { return png; }
+        try draw(cfg, c, png) catch e {
+            eprintln(f"og {ver}/{name}: {e}");
+            return none;
+        };
+        return png;
+    }
+    none
+}
+
+fn draw(cfg: Cfg, c: pkg::layout::Card, png: str) throws {
+    let dir = cfg.data + "/og";
+    try fs::create_dir_all(dir);
+    // The template and the mark beside it, as this build has them.
+    let tpl = dir + "/card.typ";
+    if !fs::exists(tpl) || (try fs::read_to_str(tpl)) != pkg::layout::CARD_TYPST { try fs::write(tpl, pkg::layout::CARD_TYPST); }
+    if !fs::exists(dir + "/wordmark.svg") { try fs::write(dir + "/wordmark.svg", WORDMARK); }
+    // Into a name of its own, so two requests for one card do not clash.
+    let tmp = f"{png[:png.len() - 4]}.{DRAWN.fetch_add(1)}.tmp.png";
+    let out = try Command::new(cfg.typst).args(["compile", "--ignore-system-fonts", "--font-path", cfg.og_fonts, "--format", "png", "--ppi", "72",
+        "--input", "section=" + c.section, "--input", "title=" + c.title, "--input", "lead=" + c.lead, "--input", "lang=" + c.lang, tpl, tmp]).stdin(Stdio::Null).output();
+    if !out.status.success() { throw ValueError::new(f"typst: {(try? str::from_utf8(out.stderr)) ?? ""}"); }
+    try fs::rename(tmp, png);
+}
+
+// Pages run only their own files, plus the analytics beacon Cloudflare
+// injects; style attributes carry the API pages' tints. The 404 page's
+// search on nabi-lang.org submits to docs.
+// No 'unsafe-inline' anywhere: no style="" in a page either (the kit's
+// chrome::align_classes, apidoc's indent classes).
+const CSP: str = "Content-Security-Policy: default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self' https://cloudflareinsights.com; object-src 'none'; base-uri 'none'; form-action 'self' https://docs.nabi-lang.org; frame-ancestors 'none'" + http::REPORT_TO;
+
+fn handle(s: TcpStream, cfg: Cfg) {
+    let t0 = Instant::now();
+    let r = try http::read_request(s, http::MAX_BODY, Duration::secs(30)) catch e {
+        try http::send(s, e.status, ["Content-Type: text/plain; charset=utf-8"], e.msg + "\n", false) catch _ {};
+        try s.close() catch _ {};
+        return;
+    };
+    let resp = route(cfg, r);
+    if resp.headers.contains("Content-Type: text/html; charset=utf-8") {
+        resp.headers.push(CSP);
+        resp.headers.push(http::REPORTING);
+        resp.headers.push(http::SPECULATION);
+    }
+    let head = r.method == "HEAD";
+    let status = resp.status;
+    if !resp.file.is_empty() {
+        let data = try fs::read(resp.file) catch _ { List::new() };
+        if status == 200 {
+            // Weak: Cloudflare drops a strong one from what it recompresses.
+            let tag = "W/" + http::etag(data);
+            resp.headers.push("ETag: " + tag);
+            // A 304 carries the validators and Cache-Control, not the type.
+            if http::not_modified(r, tag) {
+                status = 304;
+                let kept: List<str> = List::new();
+                for x in resp.headers {
+                    if !x.starts_with("Content-Type:") { kept.push(x); }
+                }
+                resp.headers = kept;
+            }
+        }
+        try http::send(s, status, resp.headers, data, head) catch _ {};
+    } else {
+        try http::send(s, resp.status, resp.headers, resp.body, head) catch _ {};
+    }
+    try s.close() catch _ {};
+    eprintln(f"{r.method} {r.header("host")}{r.path} {status} {t0.elapsed().as_ms()}ms");
+}
+
+pub fn run() throws {
+    let cfg = try load_cfg(".env");
+    try fs::create_dir_all(cfg.data + "/src");
+    using l = try net::tcp_listen(cfg.addr) {
+        eprintln(f"serving nabi-lang.org and {cfg.docs_host} on http://{cfg.addr} from {cfg.data}/out");
+        let bg = thread::spawn(|| {
+            rebuild_loop(cfg);
+            0
+        });
+        bg.detach();
+        for c in l.incoming().results() {
+            let s = try c.get() catch e {
+                eprintln(f"accept: {e}");
+                continue;
+            };
+            if ACTIVE.fetch_add(1) >= MAX_CONNS {
+                ACTIVE.fetch_sub(1);
+                try http::send(s, 503, ["Content-Type: text/plain; charset=utf-8"], "busy\n", false) catch _ {};
+                try s.close() catch _ {};
+                continue;
+            }
+            let t = thread::spawn(|| {
+                handle(s, cfg);
+                ACTIVE.fetch_sub(1);
+                0
+            });
+            t.detach();
+        }
+    }
+}
+
+#[test]
+fn signatures_and_versions() {
+    // RFC 4231 test case 2.
+    assert(signature("Jefe", "what do ya want for nothing?") == "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843", "hmac");
+    assert(minor_of("0.1.4") == "0.1" && minor_of("1.2.3") == "1.2", "minor");
+    assert(release_rank("0.1.10") > release_rank("0.1.9") && release_rank("1.0.0") > release_rank("0.9.99"), "rank");
+    assert(release_rank("0.1") == -1 && release_rank("0.1.x") == -1 && release_rank("v0.1.0") == -1, "not a release");
+    let e = parse_env("# c\nA=1\nexport B = \"x y\"\n");
+    assert(e["A"] == "1" && e["B"] == "x y", "env");
+}
+
+#[test]
+fn latest_release() {
+    assert(latest_of("{\"latest\":\"0.2.0\",\"released\":[\"0.2.0\"]}") == "0.2.0", "latest");
+    assert(latest_of("") is none && latest_of("{\"released\":[]}") is none, "none");
+}
+
+#[test]
+fn redirects() {
+    let to = |p: str, docs: bool| redirect(p, docs) ?? "-";
+    assert(to("/", false) == "-" && to("/", true) == "/latest", "root");
+    assert(to("/index.html", false) == "/" && to("/index.html", true) == "/latest", "root index");
+    assert(to("/latest", true) == "-" && to("/latest/", true) == "/latest", "version");
+    assert(to("/latest/learn/index.html", true) == "/latest/learn", "index.html");
+    // A bare `index` may name a page of its own (`std/core/index`).
+    assert(to("/latest/learn/index", true) == "-" && to("/latest/std/core/index/", true) == "/latest/std/core/index", "index");
+    assert(to("/latest/learn/05-sum-types.html", true) == "/latest/learn/05-sum-types", ".html");
+    assert(to("/0.1/learn/", true) == "/0.1/learn" && to("/0.1", true) == "-", "minor alias");
+    assert(to("/download/", false) == "/download" && to("/nabi.css", false) == "-", "www");
+    assert(query_v("v=abc") == "abc" && query_v("x=1&v=d") == "d" && query_v("vv=1") == "", "query v");
+    assert(cache_for("out/www/nabi.css", "/nabi.css", "v=1", false) == "public, max-age=3600", "stale version");
+    assert(cache_for("out/www/og.png", "/og.png", "", false) == "public, max-age=3600", "bare og");
+    assert(cache_for("out/docs/latest/learn.html", "/latest/learn", "", true) == "public, max-age=300, stale-while-revalidate=86400", "latest");
+    assert(cache_for("out/docs/dev/learn.html", "/dev/learn", "", true) == "public, max-age=300, stale-while-revalidate=86400", "dev");
+    assert(cache_for("out/docs/0.1.2/learn.html", "/0.1.2/learn", "", true) == "public, max-age=86400, stale-while-revalidate=604800", "release");
+    assert(cache_for("out/www/download.html", "/download", "", false) == "public, max-age=300, stale-while-revalidate=86400", "home");
+    assert(cache_for("out/www/fonts/Geist-Variable.woff2", "/fonts/Geist-Variable.woff2", "", false) == "public, max-age=86400, stale-while-revalidate=2592000", "fonts");
+    assert(cache_for("out/docs/latest/search-index.json", "/latest/search-index.json", "", true) == "public, max-age=300", "index");
+    assert(to("//evil.example/", false) == "/evil.example" && to("/\\evil.example/", false) == "-", "off-site");
+}

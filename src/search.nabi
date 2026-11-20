@@ -1,0 +1,248 @@
+// The search index of one language: pages, their sections and the
+// API's items, with excerpts.
+
+use pkg::Page;
+use pkg::layout;
+use web::build::{between, json_str};
+use web::url;
+
+/// The first paragraph after each `##` / `###` heading of `html`, as
+/// plain text cut to a search excerpt, by heading id.
+fn section_leads(html: str) -> Dict<str, str> {
+    let out: Dict<str, str> = Dict::new();
+    let at = 0usize;
+    loop {
+        let k = html[at:].find(" id=\"") ?? break;
+        let i = at + k;
+        at = i + 5;
+        if i < 3 || !(html[i - 3:i] == "<h2" || html[i - 3:i] == "<h3") { continue; }
+        let id = html[at:at + (html[at:].find("\"") ?? 0)];
+        let close = (html[at:].find("</h") ?? continue) + at;
+        let next_h = (html[close + 3:].find("<h") ?? html.len()) + close + 3;
+        if let (para, _): (str, usize) = between(html, close, "<p>", "</p>") {
+            let pos = (html[close:].find("<p>") ?? 0) + close;
+            if pos < next_h { out.insert(id, clip_text(markdown::strip_tags(para).replace("\n", " ").trim(), 110)); }
+        }
+    }
+    out
+}
+
+fn clip_text(s: str, n: usize) -> str {
+    if s.char_count() <= n { return s; }
+    let out = StrBuf::new();
+    let k = 0usize;
+    for c in s.chars() {
+        if k == n { break; }
+        out.push(c);
+        k += 1;
+    }
+    out.to_str().trim_end() + "…"
+}
+
+/// The search index of one language: {"p": [[title, url, excerpt]], "h":
+/// [[page, text, id, named, kind, excerpt]]}. A url is the page's
+/// canonical address in its version (`learn/05-sum-types`); `named` is 1
+/// when many pages share the heading (`Code`), so results name its page;
+/// `kind` is the API item's (`fn`, `method`, `struct` ..) or `""`.
+pub fn index(groups: [List<Page>; 3]) -> str {
+    let seen: Dict<str, usize> = Dict::new();
+    for group in groups {
+        for p in group {
+            for h in p.heads { seen.insert(h.text, (seen.get(h.text) ?? 0usize) + 1); }
+        }
+    }
+    let pl = StrBuf::new();
+    let hl = StrBuf::new();
+    let n = 0usize;
+    for group in groups {
+        for p in group {
+            if p.out == "index.html" || p.out == "ko/index.html" { continue; }
+            if n > 0 { pl.push_str(",\n"); }
+            let lead = clip_text(layout::lead_text(p.html), 110);
+            pl.push_str(f"[{json_str(p.title)},{json_str(url::canon(p.out))},{json_str(lead)}]");
+            let leads: Dict<str, str> = if p.html.is_empty() { Dict::new() } else { section_leads(p.html) };
+            for h in p.heads {
+                if h.level != 2 && h.level != 3 { continue; }
+                let (kind, note) = (p.notes.get(h.id) ?? "\t").split_once("\t") ?? ("", "");
+                let text = if kind.is_empty() { h.text } else { api_name(h.text, kind) };
+                let named = if kind.is_empty() && (seen.get(h.text) ?? 0usize) >= 4 { 1 } else { 0 };
+                let ex = if kind.is_empty() { leads.get(h.id) ?? "" } else { note };
+                if !hl.is_empty() { hl.push_str(",\n"); }
+                hl.push_str(f"[{n},{json_str(text)},{json_str(h.id)},{named},{json_str(kind)},{json_str(ex)}]");
+            }
+            n += 1;
+        }
+    }
+    f"{{\"p\":[\n{pl.to_str()}],\n\"h\":[\n{hl.to_str()}]}}\n"
+}
+
+/// An API heading's search name: `core::collections::list::List::push`
+/// -> `List::push` for a member, `List` for an item.
+fn api_name(text: str, kind: str) -> str {
+    let parts: List<str> = List::new();
+    for x in text.split("::") { parts.push(x); }
+    if parts.len() >= 2 && (kind == "method" || kind == "field" || kind == "variant" || kind == "assoc") { return parts[parts.len() - 2] + "::" + parts[parts.len() - 1]; }
+    if text.starts_with("impl ") { return text; }
+    parts[parts.len() - 1]
+}
+
+/// Words a body search gains nothing from.
+fn stop_words() -> Set<str> {
+    let s: Set<str> = Set::new();
+    for w in ["the", "and", "for", "are", "but", "not", "you", "your", "with", "this", "that", "from", "into", "its", "has", "have", "was", "were", "can", "will", "than", "then", "them", "they", "their", "there", "these", "those", "which", "what", "when", "also", "only", "each", "any", "all", "one", "two", "more", "same", "other", "does", "doesn", "isn", "here", "such", "some", "most", "out", "how", "who", "why", "amp", "quot", "nbsp", "the", "an", "as", "at", "be", "by", "do", "if", "in", "is", "it", "of", "on", "or", "so", "to", "we", "no", "이", "그", "수", "것", "등", "및", "더"] { s.insert(w); }
+    s
+}
+
+/// A Korean word of three syllables or more without its particle
+/// ("타입을" -> "타입"), as search.tsx strips a query.
+fn bare(w: str) -> str {
+    let n = w.char_count();
+    if n < 3 { return w; }
+    for c in w.chars() {
+        if c < '가' || c > '힣' { return w; }
+    }
+    for p in ["으로", "에서", "에게", "까지", "부터", "이나", "은", "는", "이", "가", "을", "를", "의", "에", "로", "와", "과", "도", "만"] {
+        if w.ends_with(p) && w.char_count() > p.char_count() + 1 { return w[:w.len() - p.len()]; }
+    }
+    w
+}
+
+/// The words of plain text `s`: letters, digits and `_`, lowercased;
+/// Hangul words bare of their particle; one or two Latin letters, bare
+/// numbers and stop words left out.
+fn words(s: str, stop: Set<str>, into: Set<str>) {
+    let w = StrBuf::new();
+    for c in (s + " ").chars() {
+        if c.is_alphanumeric() || c == '_' {
+            w.push(c);
+            continue;
+        }
+        if w.is_empty() { continue; }
+        let t = bare(w.to_str().to_lowercase());
+        w = StrBuf::new();
+        let hangul = t.chars().any(|c: char| c >= '가' && c <= '힣');
+        if (!hangul && t.len() < 3) || t.char_count() > 40 || stop.contains(t) { continue; }
+        if t.chars().all(|c: char| (c >= '0' && c <= '9') || c == '_') { continue; }
+        into.insert(t);
+    }
+}
+
+/// `n` in base 36.
+fn b36(n: usize) -> str {
+    if n == 0 { return "0"; }
+    let digits = "0123456789abcdefghijklmnopqrstuvwxyz";
+    let out: List<str> = List::new();
+    let v = n;
+    while v > 0 {
+        out.push(digits[v % 36:v % 36 + 1]);
+        v /= 36;
+    }
+    out.reverse();
+    out.join("")
+}
+
+/// Plain text of the parts of `html` a search hit can point at: before
+/// the first `##` / `###` heading (the page), then one per heading by id.
+fn sections(html: str) -> (str, Dict<str, str>) {
+    let out: Dict<str, str> = Dict::new();
+    let first = "";
+    let at = 0usize;
+    let cur = "";
+    let from = 0usize;
+    loop {
+        let k = html[at:].find(" id=\"") ?? break;
+        let i = at + k;
+        at = i + 5;
+        if i < 3 || !(html[i - 3:i] == "<h2" || html[i - 3:i] == "<h3") { continue; }
+        let text = markdown::strip_tags(html[from:i - 3]);
+        if cur.is_empty() { first = text; } else { out.insert(cur, (out.get(cur) ?? "") + " " + text); }
+        cur = html[at:at + (html[at:].find("\"") ?? 0)];
+        from = i - 3;
+    }
+    let text = markdown::strip_tags(html[from:]);
+    if cur.is_empty() { first = text; } else { out.insert(cur, (out.get(cur) ?? "") + " " + text); }
+    (first, out)
+}
+
+/// The body-text index beside `index` (same `groups`, same order): {"n":
+/// entries, "w": [[word, ids]]}, words sorted, each word's entries as
+/// rising base-36 gaps joined by `,`. An entry is a page (its text before
+/// the first section) or a `##` / `###` section, numbered as search.tsx
+/// numbers them: the pages first, then the sections in index order.
+/// Words in more than a fifth of the entries say nothing and are left
+/// out. Only the first `with_text` groups give words (the API's items
+/// are found by name); the rest are counted, for the numbering.
+pub fn text_index(groups: [List<Page>; 3], with_text: usize) -> str {
+    let stop = stop_words();
+    // (is a section, its number among pages or sections, its words)
+    let ents: List<(bool, usize, Set<str>)> = List::new();
+    let np = 0usize;
+    let nh = 0usize;
+    let gi = 0usize;
+    for group in groups {
+        gi += 1;
+        for p in group {
+            if p.out == "index.html" || p.out == "ko/index.html" { continue; }
+            if gi > with_text {
+                for h in p.heads {
+                    if h.level == 2 || h.level == 3 { nh += 1; }
+                }
+                np += 1;
+                continue;
+            }
+            let (lead, secs) = sections(p.html);
+            let pw: Set<str> = Set::new();
+            words(p.title + " " + lead, stop, pw);
+            ents.push((false, np, pw));
+            for h in p.heads {
+                if h.level != 2 && h.level != 3 { continue; }
+                let hw: Set<str> = Set::new();
+                words(secs.get(h.id) ?? h.text, stop, hw);
+                ents.push((true, nh, hw));
+                nh += 1;
+            }
+            np += 1;
+        }
+    }
+    let post: Dict<str, List<usize>> = Dict::new();
+    for (sec, k, ws) in ents {
+        let id = if sec { np + k } else { k };
+        for w in ws {
+            if !post.contains_key(w) { post.insert(w, List::new()); }
+            post[w].push(id);
+        }
+    }
+    let total = np + nh;
+    let keys: List<str> = List::new();
+    for w in post.keys() {
+        if post[w].len() * 5 <= total { keys.push(w); }
+    }
+    keys.sort();
+    let b = StrBuf::new();
+    b.push_str(f"{{\"n\":{total},\"w\":[\n");
+    let first = true;
+    for w in keys {
+        let ids = post[w];
+        ids.sort();
+        let gaps: List<str> = List::new();
+        let last = 0usize;
+        for id in ids {
+            gaps.push(b36(id - last));
+            last = id;
+        }
+        if !first { b.push_str(",\n"); }
+        first = false;
+        b.push_str(f"[{json_str(w)},\"{gaps.join(",")}\"]");
+    }
+    b.push_str("]}\n");
+    b.to_str()
+}
+
+#[test]
+fn text_words() {
+    let into: Set<str> = Set::new();
+    words("The read_to_str function reads 42 files; 타입을 쓰면 x.", stop_words(), into);
+    assert(into.contains("read_to_str") && into.contains("reads") && into.contains("files"), "latin words");
+    assert(into.contains("타입") && !into.contains("the") && !into.contains("42") && !into.contains("x"), "bare and dropped");
+    assert(b36(0) == "0" && b36(35) == "z" && b36(36) == "10", "base 36");
+}

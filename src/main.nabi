@@ -1,0 +1,445 @@
+// nabi-lang.org: builds two static sites into `out` (site.nabion) and
+// checks every internal link of both.
+//
+//   out/www/        nabi-lang.org: the landing page (www/index.md), the
+//                   download page (www/download.md) and the
+//                   installers
+//   out/docs/<v>/   docs.nabi-lang.org/<v>/: the spec (English at `spec/`,
+//                   Korean at `ko/spec/`), the guide and examples (docs/)
+//                   and the standard library API, for one version
+//   out/docs/       versions.json, index.html (to latest/) and 404.html
+//                   (each version directory has its own too);
+//                   latest/ is the newest release (versions.nabion) again
+//
+// Every link is written as a canonical root-relative address (web::url),
+// so each version directory, latest/ included, links within itself.
+//
+// Other version directories already in out/docs/ are kept, so a deploy
+// lays the builds of earlier tags there first.
+//
+//   nabi run [-- --version <v>]   build; <v> is a release ("0.1") or dev
+//   nabi run -- check             build; run the pages' code blocks; exit 1
+//                                on a broken link or a failing block
+//   nabi run -- code [filter]     only run the code blocks (of pages whose
+//                                path contains `filter`)
+//   nabi run -- home              rewrite home/<name>.out, what `nabi run`
+//                                prints for the landing page's programs
+
+mod apidoc;
+mod check;
+mod files;
+mod guide;
+mod home;
+mod layout;
+mod links;
+mod llms;
+mod search;
+mod serve;
+mod spec;
+mod versions;
+mod www;
+
+use pkg::check::{code_check, home_check};
+use core::crypto::HashAlgorithm;
+use core::encoding;
+use core::time::Instant;
+use markdown::Heading;
+use std::env;
+use std::fs;
+use std::nabion;
+use std::process;
+use web::build::{png_size, write};
+use web::kit;
+
+/// The name with the slogan, `Nabi: <tagline>`, or the name alone without
+/// one.
+pub fn headline(site: Site) -> str {
+    if site.tagline.is_empty() { site.title } else { f"{site.title}: {site.tagline}" }
+}
+
+#[derive(Nabion)]
+pub struct Site {
+    pub title: str;
+    pub tagline: str;
+    /// The landing page's `<meta name="description">`, and the fallback
+    /// for pages without a first paragraph.
+    pub description: str = "";
+    /// The toolchain release the home and download pages offer: the
+    /// newest in versions.nabion.
+    pub release: str = "";
+    /// Where the home site is served.
+    pub base_url: str = "https://nabi-lang.org";
+    /// The playground; docs code blocks open there with "try".
+    pub playground: str = "https://playground.nabi-lang.org";
+    /// Where the docs are served, above the version directories.
+    pub docs_url: str = "https://docs.nabi-lang.org";
+    /// The docs version being built: `--version`, else `dev`.
+    pub version: str = "dev";
+    /// The newest release. Only its docs open code in the playground,
+    /// which runs that release.
+    pub newest: str = "";
+    /// Its newest patch release (`0.1.4`), for the banner of other versions.
+    pub newest_release: str = "";
+    /// The spec's English edition (`spec/en`), relative to this file.
+    pub spec: str = "../spec/en";
+    /// The Korean edition (`spec/ko`), rendered under `ko/`; `""` for none.
+    pub spec_ko: str = "";
+    /// Where links that leave the spec directory point (`../LICENSE`).
+    pub spec_repo: str;
+    pub spec_branch: str = "main";
+    /// The guide and examples (nabi-lang/docs), relative to this file.
+    pub docs: str = "../docs";
+    /// The home site's pages (nabi-lang/www), relative to this file.
+    pub www: str = "../www";
+    /// nabi-lang/docs, for the docs pages' edit links.
+    pub repo: str = "https://github.com/nabi-lang/docs";
+    pub packages: str;
+    /// The standard library sources (`bare/src/`, `core/src/`, `std/src/`).
+    pub library: str = "../nabi/library";
+    pub out: str = "public";
+    /// The release this build documents (`0.1.2`), and the earlier
+    /// releases of its version, oldest first: what the API's "Added in"
+    /// badges compare against. Set by `serve` when it archives a release;
+    /// empty, no badges.
+    pub built_from: str = "";
+    pub history: List<Release> = List::new();
+    /// The og:image version: the first 10 hex digits of static/og.png's
+    /// SHA-256, set on load. A new image is a new URL, so link previews
+    /// refetch it. Its pixel size comes from the same file.
+    pub og: str = "";
+    pub og_w: i64 = 0i64;
+    pub og_h: i64 = 0i64;
+    /// The docs being wrapped have no error code pages: no Error codes
+    /// section in the chrome.
+    pub no_errors: bool = false;
+    /// The static files' versions (layout::asset), by name, set on load.
+    pub assets: Dict<str, str> = Dict::new();
+    /// versions.nabion, for the version menu.
+    pub released: List<str> = List::new();
+    pub patches: Dict<str, str> = Dict::new();
+}
+
+/// A release and its standard library sources.
+#[derive(Nabion)]
+pub struct Release {
+    pub release: str;
+    pub library: str;
+}
+
+/// versions.nabion: the released docs versions, newest first.
+#[derive(Nabion)]
+pub struct Versions {
+    pub released: List<str>;
+    /// The newest patch release of each, e.g. "0.1" -> "0.1.2".
+    pub patches: Dict<str, str> = Dict::new();
+}
+
+pub struct Page {
+    /// Source path relative to the spec directory; `""` for site pages.
+    pub src: str;
+    /// Output path relative to the site root.
+    pub out: str;
+    /// Spec directory of the source (its chapter).
+    pub dir: str;
+    pub title: str;
+    pub html: str;
+    pub heads: List<Heading>;
+    /// Search notes of headings by id: `kind\tsummary` (API items).
+    pub notes: Dict<str, str> = Dict::new();
+}
+
+/// A doc page's content and navigation without any chrome: enough for the
+/// current generator to re-wrap it. Archived per released version so a
+/// design change reaches old versions while their content stays pinned.
+#[derive(Nabion)]
+pub struct Frag {
+    pub out: str;
+    pub title: str;
+    pub side: str;
+    pub body: str;
+    pub pager: str;
+    /// "On this page" items, or `""`.
+    pub toc: str = "";
+    /// hreflang `<link>`s for `<head>`, or `""`.
+    pub head: str;
+    /// The page in the other language, from the version root, or `""`.
+    pub alt: str = "";
+    /// This page's heading ids paired with those of `alt` (search.js
+    /// carries the reader's section over).
+    pub sec: str = "";
+    /// A Korean page still in English: kept out of search engines.
+    pub noindex: bool = false;
+    /// The breadcrumb between the section and this page (spec chapters),
+    /// each link after a separator, or `""`.
+    pub crumb: str = "";
+    /// An API page's breadcrumb (web::apidoc::nav::crumb), shown in place
+    /// of the section's; `""` on other pages.
+    pub trail: str = "";
+}
+
+/// One released version's docs as fragments, plus its search index.
+#[derive(Nabion)]
+pub struct Bundle {
+    pub version: str;
+    pub pages: List<Frag>;
+    pub search: str;
+    /// The Korean pages' search index.
+    pub search_ko: str = "";
+    /// The body-text indexes (search::text_index), English and Korean.
+    pub text: str = "";
+    pub text_ko: str = "";
+    /// llms.txt and llms-full.txt, links against llms::BASE.
+    pub llms: str = "";
+    pub llms_full: str = "";
+}
+
+/// Final HTML of a doc page: the current chrome around `f`'s content.
+/// `latest` holds the pages of the newest release.
+pub fn wrap(site: Site, f: Frag, latest: Set<str>) -> str {
+    layout::page(site, f, layout::ver_banner(site, layout::root_of(f.out), f.out, latest.contains(f.out)))
+}
+
+/// Where `path` of the repository `repo` is edited: GitHub's editor on
+/// main for dev and the newest release (changes land there), else the
+/// file as it is on `branch`, the older release's.
+pub fn edit_url(site: Site, repo: str, branch: str, path: str) -> str {
+    if site.version == "dev" || site.version == site.newest || site.newest.is_empty() { f"{repo}/edit/main/{path}" } else { f"{repo}/blob/{branch}/{path}" }
+}
+
+/// updated.nabion of a content checkout (`root`): each Markdown file's last
+/// commit date, written by the content bundler; empty without one.
+#[derive(Nabion)]
+pub struct Updated {
+    pub pages: Dict<str, str>;
+}
+
+pub fn updated(root: str) -> Dict<str, str> {
+    let text = try fs::read_to_str(root + "/updated.nabion") catch _ { return Dict::new(); };
+    let u: Updated = try nabion::from_str(text) catch e {
+        eprintln(f"note: {root}/updated.nabion: {e}");
+        return Dict::new();
+    };
+    u.pages
+}
+
+/// `site.nabion`, with the fields of `site.local.nabion` (git-ignored,
+/// for a machine whose checkouts are not siblings), or of the file
+/// $NABI_SITE_LOCAL names (the server's builds), laid over it.
+pub fn load_site() throws -> Site {
+    let base = try nabion::parse(try fs::read_to_str("site.nabion"));
+    let local_path = try env::var("NABI_SITE_LOCAL") catch _ { "site.local.nabion" };
+    if fs::exists(local_path) {
+        let local = try nabion::parse(try fs::read_to_str(local_path));
+        if let nabion::Value::Struct { name: _, fields } = base {
+            if let nabion::Value::Struct { name: _, fields: over } = local {
+                for (k, v) in over.iter() { fields.insert(k, v); }
+            }
+        }
+    }
+    let site: Site = try nabion::from_value(base) catch e { throw ValueError::new(f"site.nabion: {e}"); };
+    site.og = try og_version("static/og.png");
+    let (w, h) = try png_size("static/og.png");
+    site.og_w = w;
+    site.og_h = h;
+    for f in kit::files() { site.assets.insert(f.name, encoding::hex::encode(HashAlgorithm::Sha256.digest(f.data))[:10]); }
+    for name in ["style.css", "search.js"] { site.assets.insert(name, try og_version("static/" + name)); }
+    site
+}
+
+/// The first 10 hex digits of the SHA-256 of the file at `path`.
+pub fn og_version(path: str) throws -> str {
+    encoding::hex::encode(HashAlgorithm::Sha256.digest(try fs::read(path)))[:10]
+}
+
+/// The nabi-lang/docs branch a build documents: `main` for dev, else the
+/// newest patch of the version (`v0.1.4`).
+pub fn docs_branch(site: Site) -> str {
+    if site.version == "dev" || site.built_from.is_empty() { "main" } else { "v" + site.built_from }
+}
+
+/// versions.nabion, or the file $NABI_VERSIONS names (the server's builds).
+fn load_versions() throws -> Versions {
+    let path = try env::var("NABI_VERSIONS") catch _ { "versions.nabion" };
+    try nabion::from_str(try fs::read_to_str(path)) catch e { throw ValueError::new(f"{path}: {e}"); }
+}
+
+/// A version is `dev`, a minor (`0.1`, whose patch releases share one
+/// build) or a patch release (`0.1.4`, the server's builds).
+fn is_version(v: str) -> bool {
+    if v == "dev" { return true; }
+    let dots = 0usize;
+    let digits = 0usize;
+    for c in v.chars() {
+        if c == '.' {
+            if digits == 0 { return false; }
+            dots += 1;
+            digits = 0;
+        } else if c >= '0' && c <= '9' {
+            digits += 1;
+        } else {
+            return false;
+        }
+    }
+    (dots == 1 || dots == 2) && digits > 0
+}
+
+fn usage() {
+    eprintln("usage: nabi run [-- [check] [--version <major.minor> | --version dev] | -- code [filter] | -- archive <major.minor> <dir>]");
+    process::exit(2);
+}
+
+/// hreflang links between a page's English and Korean editions.
+pub fn hreflang(site: Site, en: str, ko: str) -> str {
+    let e = markdown::esc(layout::latest(site, en));
+    f"<link rel=\"alternate\" hreflang=\"en\" href=\"{e}\">\n<link rel=\"alternate\" hreflang=\"ko\" href=\"{markdown::esc(layout::latest(site, ko))}\">\n<link rel=\"alternate\" hreflang=\"x-default\" href=\"{e}\">\n"
+}
+
+fn main() throws {
+    let t0 = Instant::now();
+    let args = env::args();
+    if args.len() > 1 && args[1] == "serve" {
+        try serve::run();
+        return;
+    }
+    if args.len() > 1 && args[1] == "home" {
+        _ = try home_check(true);
+        return;
+    }
+    if args.len() > 1 && args[1] == "code" {
+        let bad = try code_check(if args.len() > 2 { args[2] } else { "" });
+        if bad.len() > 0 { process::exit(1); }
+        return;
+    }
+    let strict = false;
+    let version = "dev";
+    let archive_out = "";
+    let k = 1usize;
+    while k < args.len() {
+        if args[k] == "check" {
+            strict = true;
+        } else if args[k] == "--version" && k + 1 < args.len() {
+            version = args[k + 1];
+            k += 1;
+        } else if args[k] == "archive" && k + 2 < args.len() {
+            version = args[k + 1];
+            archive_out = args[k + 2];
+            k += 2;
+        } else {
+            usage();
+        }
+        k += 1;
+    }
+    if !is_version(version) {
+        eprintln(f"error: `--version {version}`: write a release as <major>.<minor> (`--version 0.1`) or <major>.<minor>.<patch>, or `--version dev`");
+        process::exit(2);
+    }
+    let site = try load_site();
+    site.version = version;
+    let vs = try load_versions();
+    let newest = if vs.released.len() > 0 { vs.released[0] } else { "" };
+    site.newest = newest;
+    site.newest_release = vs.patches.get(newest) ?? newest;
+    if !site.newest_release.is_empty() { site.release = site.newest_release; }
+    site.released = vs.released;
+    site.patches = vs.patches;
+    if version != "dev" && !vs.released.contains(version) {
+        eprintln(f"note: {version} is not in versions.nabion, so the version menu will not list it");
+    }
+    let out_root = site.out;
+
+    // Each doc page as a chrome-less fragment, keyed by output path; the
+    // current chrome is applied in `wrap`, so a released version's archived
+    // fragments re-wrap with it too.
+    let frags: Dict<str, Frag> = Dict::new();
+    let pages = try spec::pages(site, spec::root(site.spec), "", false);
+    let ko_pages: List<Page> = if site.spec_ko.is_empty() { List::new() } else { try spec::pages(site, spec::root(site.spec_ko), "ko/", true) };
+    spec::frags(site, pages, ko_pages, frags);
+    let (own, ko_own, translated) = try guide::pages(site);
+    guide::frags(site, own, ko_own, translated, frags);
+    let (mods, api, api_ko) = try apidoc::frags(site, pages, frags);
+    links::fix(frags, own);
+
+    // A search index per language: every page, its `##` / `###` sections
+    // and the API's items and members.
+    let idx = search::index([own, pages, api]);
+    let idx_ko = search::index([ko_own, ko_pages, api_ko]);
+    let text = (search::text_index([own, pages, api], 2), search::text_index([ko_own, ko_pages, api_ko], 2));
+    let shown = if site.built_from.is_empty() { version } else { site.built_from };
+    let llm = (llms::index(site, shown, own, pages, mods), try llms::full(site, shown, own));
+
+    // The newest release's pages, for the banner's link on other versions.
+    let archive = try env::var("NABI_DOCS_ARCHIVE") catch _ { "" };
+    let latest_outs: Set<str> = Set::new();
+    let latest_hidden: Set<str> = Set::new();
+    if version == newest {
+        for o in frags.keys() {
+            latest_outs.insert(o);
+            if frags[o].noindex { latest_hidden.insert(o); }
+        }
+    } else if !archive.is_empty() && fs::exists(f"{archive}/{newest}/bundle.nabion") {
+        let b = try versions::bundle(archive, newest);
+        for f in b.pages {
+            latest_outs.insert(f.out);
+            if f.noindex { latest_hidden.insert(f.out); }
+        }
+    }
+
+    // This version's pages, with the current chrome.
+    site.no_errors = !frags.contains_key("errors/index.html");
+    let files: Dict<str, str> = Dict::new();
+    for out in frags.keys() { files.insert(out, wrap(site, frags[out], latest_outs)); }
+
+    // `archive` mode: emit this version's content as a bundle for a later
+    // deploy to re-wrap with the chrome of the day, instead of writing HTML.
+    // The link check still runs, so a release with a broken link is caught.
+    if !archive_out.is_empty() {
+        let abad = links::check(files, try files::static_names());
+        for b in abad { eprintln(f"broken link: {b}"); }
+        if abad.len() > 0 { process::exit(1); }
+        let outs: List<str> = List::new();
+        for o in frags.keys() { outs.push(o); }
+        outs.sort();
+        let fl: List<Frag> = List::new();
+        for o in outs { fl.push(frags[o]); }
+        try write(archive_out, "bundle.nabion", try nabion::to_str(Bundle { version: version, pages: fl, search: idx, search_ko: idx_ko, text: text.0, text_ko: text.1, llms: llm.0, llms_full: llm.1 }));
+        println(f"archived docs {version}: {fl.len()} pages → {archive_out}/bundle.nabion ({t0.elapsed():?})");
+        return;
+    }
+
+    let (www, www_urls, www_cards) = try www::pages(ref site, own, ko_own, latest_outs);
+    let docs_root = out_root + "/docs";
+    let docs_dir = docs_root + "/" + version;
+    let www_dir = out_root + "/www";
+    if fs::exists(www_dir) { try fs::remove_dir_all(www_dir); }
+    let statics = try files::write_version(site, docs_root, version, files, idx, idx_ko, text, llm);
+    let fl: List<Frag> = List::new();
+    for o in frags.keys() { fl.push(frags[o]); }
+    try write(docs_root + "/" + version, "og.nabion", try nabion::to_str(layout::cards(fl)));
+    let www_statics = try www::write_to(site, www_dir, www, www_urls, www_cards);
+
+    // latest/ is the newest release's pages again, linking within latest/:
+    // this build's, or the archived ones re-wrapped.
+    let latest = if version == newest { versions::Latest { pages: files, search: idx, search_ko: idx_ko, text: text, llms: llm } } else { versions::Latest { pages: Dict::new(), search: "", search_ko: "", text: ("", ""), llms: ("", "") } };
+    let (latest2, arch_bad) = if archive.is_empty() { (latest, List::<str>::new()) } else { try versions::rewrap(ref site, vs, archive, docs_root, latest_outs, latest) };
+    let has_latest = try versions::root(ref site, vs, docs_root, www_dir, latest_outs, latest_hidden, latest2);
+
+    let bad = links::check(files, statics);
+    for b in links::check(www, www_statics) { bad.push("www/" + b); }
+    for b in arch_bad { bad.push(b); }
+    for b in try links::relative_assets(out_root) { bad.push(b); }
+    for b in bad { eprintln(f"broken link: {b}"); }
+    let latest_note = if has_latest { ", latest/ = " + newest } else { "" };
+    println(f"docs {version}: {pages.len()} + {ko_pages.len()} (ko) spec pages + {own.len()} guide pages + {api.len()} API pages → {docs_dir}/ ({files.len()} html){latest_note}; home → {www_dir}/; {bad.len()} broken links, {t0.elapsed():?}");
+    if !has_latest && !newest.is_empty() {
+        eprintln(f"note: {newest} is neither built now nor archived, so no latest/: build it with `--version {newest}`, or point NABI_DOCS_ARCHIVE at an archive");
+    }
+    if strict {
+        let failing = try code_check("");
+        for b in try home_check(false) {
+            eprintln(f"home: {b}");
+            failing.push(b);
+        }
+        println(f"checked in {t0.elapsed():?}");
+        if bad.len() > 0 || failing.len() > 0 { process::exit(1); }
+    }
+}

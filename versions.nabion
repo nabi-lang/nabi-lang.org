@@ -1,0 +1,10 @@
+// Released docs versions, newest first (read by src/main.nabi). The
+// first is served at docs.nabi-lang.org/latest/ too. patches names the
+// release each version's docs were built from, for the version menu.
+// Local builds only: the server lists the vX.Y.Z branches of docs and
+// spec. Empty until 0.1.0 ships; then `released: ["0.1"]` and
+// `patches: { "0.1": "0.1.0" }`, and each patch release moves its entry.
+Versions {
+    released: [],
+    patches: {},
+}

@@ -1,0 +1,243 @@
+// The home site (nabi-lang.org): its pages from nabi-lang/www, the
+// download page with archive sizes, robots.txt, security.txt and the
+// sitemap.
+
+use pkg::files::copy_static;
+use pkg::home;
+use pkg::layout;
+use pkg::links::site_hrefs;
+use pkg::{Page, Site};
+use std::fs;
+use std::nabion;
+use std::process::{Command, Stdio};
+use web::build::{between, write};
+use web::chrome;
+
+pub fn sitemap(urls: List<str>) -> str {
+    let b = StrBuf::new();
+    b.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n");
+    for u in urls { b.push_str(f"<url><loc>{markdown::esc(u)}</loc></url>\n"); }
+    b.push_str("</urlset>\n");
+    b.to_str()
+}
+
+/// The size of each asset of release `r` on GitHub, by file name, from
+/// the release API; empty when it cannot be read (offline, rate limit).
+pub fn release_sizes(r: str) -> Dict<str, i64> {
+    let sizes: Dict<str, i64> = Dict::new();
+    let out = try Command::new("curl").args(["-fsSL", "--max-time", "15", "-H", "Accept: application/vnd.github+json", f"https://api.github.com/repos/nabi-lang/nabi/releases/tags/v{r}"]).stdin(Stdio::Null).output() catch _ { return sizes; };
+    if !out.status.success() { return sizes; }
+    let text = (try? str::from_utf8(out.stdout)) ?? "";
+    // Each asset object has "name" before "size"; the uploader's object
+    // in between has neither.
+    let at = text.find("\"assets\":") ?? text.len();
+    loop {
+        let (name, k) = between(text, at, "\"name\": \"", "\"") ?? break;
+        at = k;
+        let (num, k2) = between(text, at, "\"size\": ", ",") ?? break;
+        if let n: i64 = try? num.trim().parse::<i64>() {
+            sizes.insert(name, n);
+            at = k2;
+        }
+    }
+    sizes
+}
+
+/// `42034164` -> `42 MB`.
+pub fn mb(n: i64) -> str { f"{(n + 500000i64) / 1000000i64} MB" }
+
+/// The download page as served: each archive link followed by its size
+/// (`sizes`), each system's row marked with its os, architecture and libc
+/// for search.js.
+pub fn download_page(html: str, sizes: Dict<str, i64>) -> str {
+    let h = html;
+    for (name, n) in sizes.iter() {
+        if name.ends_with(".sha256") { continue; }
+        let pat = f"/{name}\">";
+        let k = h.find(pat) ?? continue;
+        let e = (h[k:].find("</a>") ?? continue) + k + 4;
+        h = h[:e] + f"<span class=\"sz\">{mb(n)}</span>" + h[e:];
+    }
+    let out = StrBuf::new();
+    let rest = h;
+    let open = "<div class=\"dl-os\">";
+    loop {
+        let k = rest.find(open) ?? rest.len();
+        out.push_str(rest[:k]);
+        if k == rest.len() { break; }
+        rest = rest[k + open.len():];
+        let triple = if let (t, _): (str, usize) = between(rest, 0, "<code>", "</code>") { t } else { "" };
+        out.push_str(f"<div class=\"dl-os\"{os_attrs(triple)}>");
+    }
+    out.to_str()
+}
+
+/// ` data-os="linux" data-arch="aarch64" data-libc="gnu"` for a triple.
+pub fn os_attrs(triple: str) -> str {
+    let os = if triple.contains("apple-darwin") { "macos" } else if triple.contains("windows") { "windows" } else if triple.contains("linux") { "linux" } else if triple.contains("freebsd") { "freebsd" } else { "" };
+    if os.is_empty() { return ""; }
+    let arch = (triple.split_once("-") ?? (triple, "")).0;
+    let libc = if triple.ends_with("-musl") { "musl" } else if triple.ends_with("-gnu") { "gnu" } else { "" };
+    f" data-os=\"{os}\" data-arch=\"{arch}\" data-libc=\"{libc}\""
+}
+
+/// Page `path` of nabi-lang/www as HTML, with its title. `{release}` is
+/// the release the download page offers; `docs:<path>` links into the
+/// newest docs (`dir` "ko/": the Korean docs), `play:` into the
+/// playground.
+fn render(site: Site, path: str, dir: str) throws -> (str, str) {
+    let ko = !dir.is_empty();
+    let text = uncommented(try fs::read_to_str(path)).replace("{release}", site.release);
+    let doc = layout::md(text, |h| if h.starts_with("docs:") { layout::latest(site, dir + h["docs:".len():]) } else { h }, ko);
+    // Raw HTML blocks are not seen by the link mapper.
+    let html = doc.html.replace("href=\"docs:", "href=\"" + site.docs_url + "/latest/" + dir).replace("href=\"play:", "href=\"" + site.playground + "/");
+    (doc.title, html)
+}
+
+/// `text` without the lines that are one whole HTML comment, which the
+/// markdown renderer would show as text.
+pub fn uncommented(text: str) -> str {
+    let b = StrBuf::new();
+    for l in text.lines() {
+        let t = l.trim();
+        if t.starts_with("<!--") && t.ends_with("-->") { continue; }
+        b.push_str(l);
+        b.push('\n');
+    }
+    b.to_str()
+}
+
+/// A post of www's news/: `news/<name>.md`, dated by a
+/// `<!-- date: YYYY-MM-DD -->` line (`unreleased` before it is out).
+pub struct Post {
+    pub name: str;
+    pub date: str;
+    pub title: str;
+    pub html: str;
+}
+
+/// The date of a post's source: what its `<!-- date: ... -->` line says,
+/// "" without one.
+pub fn post_date(text: str) -> str {
+    if let (d, _): (str, usize) = between(text, 0, "<!-- date: ", "-->") { d.trim() } else { "" }
+}
+
+/// The posts under `dir` (www's news/ or ko/news/), newest first; one
+/// not yet dated goes on top.
+pub fn posts(site: Site, dir: str, lang: str) throws -> List<Post> {
+    let list: List<Post> = List::new();
+    if !fs::exists(dir) { return list; }
+    for entry in (try fs::read_dir(dir)).results() {
+        let e = try entry.get() catch _ { continue; };
+        let file = e.file_name();
+        if !file.ends_with(".md") || file == "index.md" { continue; }
+        let path = dir + "/" + file;
+        let (title, html) = try render(site, path, lang);
+        list.push(Post { name: file[:file.len() - 3], date: post_date(try fs::read_to_str(path)), title: title, html: html });
+    }
+    // "unreleased" sorts after every "2..." date.
+    list.sort_by(|a, b| (b.date + b.name).cmp(a.date + a.name));
+    list
+}
+
+/// A post's date line, under its title.
+pub fn dated(p: Post, ko: bool) -> str {
+    let when = if p.date.starts_with("2") { f"<time datetime=\"{markdown::esc(p.date)}\">{layout::long_date(p.date, ko)}</time>" } else if ko { "공개 전" } else { "Not published yet" };
+    f"<p class=\"post-date\">{when}</p>"
+}
+
+/// `html` with `extra` right after its `<h1>`.
+fn after_h1(html: str, extra: str) -> str {
+    let k = html.find("</h1>") ?? return extra + html;
+    html[:k + 5] + "\n" + extra + html[k + 5:]
+}
+
+/// The list of `posts` on news/index.html, each linking to its page.
+pub fn post_list(list: List<Post>, ko: bool) -> str {
+    let b = StrBuf::new();
+    b.push_str("<ul class=\"posts\">");
+    for p in list {
+        b.push_str(f"<li><a href=\"{markdown::esc(p.name)}.html\">{p.title}</a> {dated(p, ko)}</li>");
+    }
+    b.push_str("</ul>\n");
+    b.to_str()
+}
+
+/// The home site's pages by output path (index, download, roadmap, faq
+/// and news/ from nabi-lang/www, their Korean editions from its ko/
+/// under `ko/`, and 404), their addresses for the sitemap, and the title
+/// of each page that has its own card. The landing page links into the
+/// newest docs with `docs:<path>` (a Korean page into the Korean docs);
+/// `latest` holds latest/'s pages, so an Error codes link shows only if
+/// those have them.
+pub fn pages(ref site: Site, own: List<Page>, ko_own: List<Page>, latest: Set<str>) throws -> (Dict<str, str>, List<str>, List<(str, str)>) {
+    let www: Dict<str, str> = Dict::new();
+    let urls: List<str> = List::new();
+    let cards: List<(str, str)> = List::new();
+    let docs_no_errors = site.no_errors;
+    if latest.len() > 0 { site.no_errors = !latest.contains("errors/index.html"); }
+    let sizes = release_sizes(site.release);
+    for (dir, group) in [("", own), ("ko/", ko_own)] {
+        let ko = !dir.is_empty();
+        let examples: List<home::Example> = List::new();
+        for p in group {
+            let at = p.out.strip_prefix(dir) ?? p.out;
+            if at.starts_with("examples/") && at != "examples/index.html" {
+                examples.push(home::Example { title: p.title, lead: layout::lead_text(p.html), href: layout::latest(site, p.out) });
+            }
+        }
+        let news = try posts(site, f"{site.www}/{dir}news", dir);
+        for name in ["index", "download", "roadmap", "faq", "news/index"] {
+            let path = f"{site.www}/{dir}{name}.md";
+            if !fs::exists(path) { continue; }
+            let (title, html) = try render(site, path, dir);
+            let out = dir + name + ".html";
+            let body = if name == "index" { home::body(site, examples, sizes, ko) } else if name == "download" { download_page(html, sizes) } else if name == "news/index" { html + post_list(news, ko) } else { html };
+            if name != "index" { cards.push((out, title)); }
+            www.insert(out, layout::www_page(site, out, title, body));
+            urls.push(site.base_url + "/" + dir + if name == "index" { "" } else if name == "news/index" { "news" } else { name });
+        }
+        for p in news {
+            let out = f"{dir}news/{p.name}.html";
+            www.insert(out, layout::www_page(site, out, p.title, after_h1(p.html, dated(p, ko))));
+            // A post goes into the sitemap once it is out.
+            if p.date.starts_with("2") { urls.push(f"{site.base_url}/{dir}news/{p.name}"); }
+        }
+    }
+    www.insert("404.html", layout::www_page(site, "404.html", "Page not found", layout::not_found(|p| layout::latest(site, p), false, site.no_errors)));
+    site.no_errors = docs_no_errors;
+    (www, urls, cards)
+}
+
+/// The home site written into `dir`: `pages` (www::pages) with canonical
+/// links, the static files, the list of `cards` (og.nabion), the
+/// installers from the toolchain checkout, robots.txt, security.txt and
+/// the sitemap of `urls`; the static names, for the link check.
+pub fn write_to(site: Site, dir: str, pages: Dict<str, str>, urls: List<str>, cards: List<(str, str)>) throws -> Set<str> {
+    for out in pages.keys() { try write(dir, out, site_hrefs(site, pages[out], "", out)); }
+    let statics = try copy_static(dir);
+    let list: List<layout::Card> = List::new();
+    for (out, title) in cards { list.push(layout::www_card(site, out, title)); }
+    try write(dir, "og.nabion", try nabion::to_str(layout::Cards { cards: list }));
+    // The installers (/install.sh, /install.ps1), from the toolchain checkout.
+    for f in ["install.sh", "install.ps1"] {
+        try fs::copy(site.library + "/../" + f, dir + "/" + f);
+        statics.insert(f);
+    }
+    try write(dir, "robots.txt", f"User-agent: *\nAllow: /\nSitemap: {site.base_url}/sitemap.xml\n");
+    try write(dir, ".well-known/security.txt", f"Contact: mailto:security@nabi-lang.org\nExpires: 2027-10-24T00:00:00.000Z\nPreferred-Languages: en, ko\nCanonical: {site.base_url}/.well-known/security.txt\nPolicy: {chrome::SECURITY}\n");
+    try write(dir, "sitemap.xml", sitemap(urls));
+    statics
+}
+
+#[test]
+fn post_dates() {
+    assert(post_date("# T\n\n<!-- date: 2026-11-21 -->\n\ntext") == "2026-11-21", "dated");
+    assert(post_date("# T\n\ntext") == "", "undated");
+}
+
+#[test]
+fn comment_lines_go() {
+    let t = uncommented("# T\n<!-- date: unreleased -->\ntext <!-- kept -->\n");
+    assert(t == "# T\ntext <!-- kept -->\n", t);
+}

@@ -1,0 +1,700 @@
+// Standard library API pages (`/std/`) from the library sources: one page
+// per public module of `bare` / `core` / `std`, listing its `pub` items
+// with their `///` docs. Signatures are shown as written.
+//
+// A module with more members than one page can carry (`ints`: twelve
+// integer types) gives each of its big items a page of its own,
+// `<module>/<kind>.<name>.html`, and lists them on the module page.
+//
+// The sources are scanned by web::apidoc, and its pages() decides what
+// each page shows: an item re-exported from a private module is shown
+// inline where it is re-exported.
+
+use pkg::layout;
+use pkg::layout::rel;
+use pkg::{Frag, Page, Site};
+use markdown::{Heading, esc};
+use web::apidoc::nav;
+use web::apidoc::{Item, Module, Reexport};
+
+/// A page of one item of a split module.
+pub struct Sub {
+    pub out: str;
+    pub title: str;
+    /// Its item's kind label (`Struct`, `Implementation`), for the breadcrumb.
+    pub kind: str;
+    pub html: str;
+    pub heads: List<Heading>;
+    /// Search notes by heading id (see Page::notes).
+    pub notes: Dict<str, str>;
+}
+
+pub fn collect(lib: str) throws -> List<Module> { web::apidoc::pages(try web::apidoc::collect(lib)) }
+
+fn md(text: str) -> str {
+    if text.trim().is_empty() { return ""; }
+    layout::md(text, |h| h, false).html
+}
+
+fn summary(doc: str) -> str {
+    let t = doc.trim().replace("\n", " ");
+    if let k: usize = t.find(". ") { return t[:k + 1]; }
+    t
+}
+
+/// Inline markdown, without the paragraph.
+fn inline(text: str) -> str {
+    let h = md(text).trim();
+    if h.starts_with("<p>") && h.ends_with("</p>") { h[3:h.len() - 4] } else { h }
+}
+
+/// A module's one-line summary on page `from`: its intro's first
+/// sentence (intro), as HTML.
+fn mod_summary(m: Module, spec: Dict<str, str>, from: str) -> str { inline(summary(intro(m, spec, from))) }
+
+/// An item's id, as `nabi doc` and the registry spell it (web::apidoc::anchor).
+fn anchor(it: Item) -> str { web::apidoc::anchor(it) }
+
+/// The pages and ids of the types (structs, enums, traits, aliases) whose
+/// name is one item's alone: signatures link them.
+pub fn type_index(mods: List<Module>) -> Dict<str, str> {
+    let seen: Dict<str, usize> = Dict::new();
+    let at: Dict<str, str> = Dict::new();
+    for m in mods {
+        for it in m.items {
+            if !(it.kind == "struct" || it.kind == "enum" || it.kind == "trait" || it.kind == "type") { continue; }
+            seen.insert(it.name, (seen.get(it.name) ?? 0usize) + 1);
+            let id = anchor(it);
+            at.insert(it.name, (if moves_out(m, it) { sub_out(m, id) } else { m.out }) + "#" + id);
+        }
+    }
+    let out: Dict<str, str> = Dict::new();
+    for (name, n) in seen.iter() {
+        if n == 1 { out.insert(name, at[name]); }
+    }
+    out
+}
+
+/// Highlighted code with each type of `types` linked to its item, from
+/// page `from`; not the item `self_at` (`page#id`) itself.
+fn link_types(html: str, types: Dict<str, str>, from: str, self_at: str) -> str {
+    if types.len() == 0 { return html; }
+    let open = "<span class=\"t\">";
+    let out = StrBuf::new();
+    let rest = html;
+    loop {
+        let k = rest.find(open) ?? rest.len();
+        out.push_str(rest[:k]);
+        if k == rest.len() { break; }
+        rest = rest[k + open.len():];
+        let e = rest.find("</span>") ?? 0;
+        let name = rest[:e];
+        let to = types.get(name) ?? "";
+        if to.is_empty() || to == self_at {
+            out.push_str(open);
+            continue;
+        }
+        let (page, id) = to.split_once("#") ?? (to, "");
+        let href = if page == from { "#" + id } else { rel(from, page) + "#" + id };
+        out.push_str(f"<a class=\"t\" href=\"{href}\">{name}</a>");
+        rest = rest[e + "</span>".len():];
+    }
+    out.to_str()
+}
+
+/// Public items and members without a doc comment, and all of them.
+pub fn coverage(mods: List<Module>) -> (usize, usize) {
+    let bare = 0usize;
+    let all = 0usize;
+    for m in mods {
+        for it in m.items {
+            if it.kind == "use" { continue; }
+            all += 1;
+            if it.doc.trim().is_empty() { bare += 1; }
+            for mb in it.members {
+                all += 1;
+                if mb.doc.trim().is_empty() { bare += 1; }
+            }
+        }
+        for it in m.impls {
+            for mb in it.members {
+                all += 1;
+                if mb.doc.trim().is_empty() { bare += 1; }
+            }
+        }
+    }
+    (bare, all)
+}
+
+/// Every item and member of `mods`, keyed as the "Added in" badges look
+/// them up: `core::iter::trait.Iterator`, `...::trait.Iterator::exact_len`.
+pub fn keys(mods: List<Module>) -> Set<str> {
+    let out: Set<str> = Set::new();
+    for m in mods {
+        let all: List<(Item, str)> = List::new();
+        for it in m.items {
+            if it.kind != "use" { all.push((it, anchor(it))); }
+        }
+        for it in m.impls { all.push((it, "impl." + it.name)); }
+        for (it, id) in all {
+            let key = m.path + "::" + id;
+            out.insert(key);
+            for mb in it.members { out.insert(key + "::" + mb.name); }
+        }
+    }
+    out
+}
+
+/// "Added in 0.1.2" for an item or member newer than its docs version's
+/// first release; nothing for the rest.
+fn badge(since: Dict<str, str>, key: str) -> str {
+    if since.contains_key(key) { f"<span class=\"since\">Added in {esc(since[key])}</span>" } else { "" }
+}
+
+/// Members on one module page beyond which its big items move out.
+const SPLIT_MODULE: usize = 300;
+/// An item of a split module with this many members gets its own page.
+const SPLIT_ITEM: usize = 20;
+
+fn split(m: Module) -> bool {
+    let n = 0usize;
+    for it in m.items { n += it.members.len(); }
+    for it in m.impls { n += it.members.len(); }
+    n > SPLIT_MODULE
+}
+
+fn moves_out(m: Module, it: Item) -> bool { split(m) && it.members.len() >= SPLIT_ITEM }
+
+fn sub_out(m: Module, id: str) -> str { m.out[:m.out.len() - ".html".len()] + "/" + id + ".html" }
+
+/// The module page's stand-in for an item on a page of its own.
+fn stub_html(m: Module, it: Item, id: str, title: str, since: Dict<str, str>, types: Dict<str, str>) -> str {
+    let href = rel(m.out, sub_out(m, id));
+    let out = StrBuf::new();
+    out.push_str(f"<section class=\"api-item api-split\" id=\"{esc(id)}\"><h3><a href=\"{href}\">{esc(title)}</a>{badge(since, m.path + "::" + id)}</h3>");
+    if !it.sig.is_empty() { out.push_str(f"<pre class=\"sig\"><code>{link_types(sig_html(it.sig), types, m.out, sub_out(m, id) + "#" + id)}</code></pre>"); }
+    let more = if it.traits.len() > 0 { f", {it.traits.len()} trait implementations" } else { "" };
+    out.push_str(f"<p class=\"api-more\"><a href=\"{href}\">{it.members.len()} members{more} →</a></p></section>");
+    out.to_str()
+}
+
+/// A one-line fn signature as highlighted pieces that each stay on one
+/// line: the head up to `(`, each parameter, `-> T`, `where ...`. A
+/// narrow screen breaks it only between them. Others are highlighted
+/// whole.
+fn sig_html(sig: str) -> str { sig_named(sig, "") }
+
+/// sig_html with the declared `name` set apart: the name in ink, the
+/// modifiers before it (`pub const fn`) quiet.
+fn sig_named(sig: str, name: str) -> str {
+    if sig.contains("\n") || !sig.contains("fn ") { return nabi_syntax::highlight_nabi(sig); }
+    let fn_at = sig.find("fn ") ?? 0;
+    let pieces: List<str> = List::new();
+    let seps: List<str> = List::new();
+    let cur = StrBuf::new();
+    let sep = "";
+    let depth = 0;
+    let params = false;
+    let done = false;
+    let skip = false;
+    let prev = ' ';
+    let pos = 0usize;
+    for c in sig.chars() {
+        let at = pos;
+        pos += c.len_utf8();
+        if skip {
+            skip = false;
+            if c == ' ' { continue; }
+        }
+        if depth == 0 && done && c == ' ' && (sig[at:].starts_with(" -> ") || sig[at:].starts_with(" where ")) {
+            pieces.push(cur.to_str());
+            seps.push(sep);
+            cur.clear();
+            sep = " ";
+            prev = c;
+            continue;
+        }
+        cur.push(c);
+        if c == '(' || c == '[' || c == '{' || c == '<' {
+            depth += 1;
+        } else if c == ')' || c == ']' || c == '}' || (c == '>' && prev != '-') {
+            depth -= 1;
+        }
+        if c == '(' && depth == 1 && !params && !done && at > fn_at {
+            params = true;
+            pieces.push(cur.to_str());
+            seps.push(sep);
+            cur.clear();
+            sep = "<wbr>";
+        } else if c == ')' && depth == 0 && params {
+            params = false;
+            done = true;
+        } else if c == ',' && depth == 1 && params {
+            pieces.push(cur.to_str());
+            seps.push(sep);
+            cur.clear();
+            sep = " ";
+            skip = true;
+        }
+        prev = c;
+    }
+    if !cur.is_empty() {
+        pieces.push(cur.to_str());
+        seps.push(sep);
+    }
+    let out = StrBuf::new();
+    for k in 0..pieces.len() {
+        out.push_str(seps[k]);
+        let p = pieces[k];
+        let at: usize | none = if k == 0 && !name.is_empty() { p.find("fn " + name) } else { none };
+        if let i: usize = at {
+            let n = i + 3;
+            out.push_str(f"<span class=\"nw\"><span class=\"mod\">{esc(p[:n])}</span><span class=\"nm\">{esc(name)}</span>{nabi_syntax::highlight_nabi(p[n + name.len():])}</span>");
+        } else {
+            out.push_str(f"<span class=\"nw\">{nabi_syntax::highlight_nabi(p)}</span>");
+        }
+    }
+    out.to_str()
+}
+
+const KINDS: [(str, str); 8] = [
+    ("use", "Re-exports"), ("struct", "Structs"), ("enum", "Enums"), ("trait", "Traits"),
+    ("type", "Type aliases"), ("fn", "Functions"), ("const", "Constants"), ("static", "Statics"),
+];
+
+/// A link to line `line` of `file` (under library/) at `at` (`v0.1.4`,
+/// `main`); nothing without a line.
+fn src_link(file: str, line: usize, at: str) -> str {
+    if line == 0 || file.is_empty() { return ""; }
+    f"<a class=\"src\" href=\"https://github.com/nabi-lang/nabi/blob/{at}/library/{esc(file)}#L{line}\">Source</a>"
+}
+
+/// Item `it` on page `from` (its module's, or its own when it moved out).
+fn item_html(it: Item, id: str, title: str, heads: List<Heading>, m: Module, since: Dict<str, str>, notes: Dict<str, str>, at: str, types: Dict<str, str>, from: str) -> str {
+    let path = m.path;
+    let key = path + "::" + id;
+    let here = from + "#" + id;
+    // Shown inline from a private module: its own file.
+    let file = if it.file.is_empty() { m.file } else { it.file };
+    let out = StrBuf::new();
+    out.push_str(f"<section class=\"api-item\" id=\"{esc(id)}\"><h3><a href=\"#{esc(id)}\">{esc(title)}</a>{badge(since, key)}{src_link(file, it.line, at)}</h3>");
+    notes.insert(id, (if it.kind == "impl" { "impl" } else { it.kind }) + "\t" + summary(it.doc).replace("`", ""));
+    if !it.sig.is_empty() { out.push_str(f"<pre class=\"sig\"><code>{link_types(sig_html(it.sig), types, from, here)}</code></pre>"); }
+    out.push_str(md(it.doc));
+    if it.members.len() > 0 {
+        out.push_str("<ul class=\"members\">");
+        for mb in it.members {
+            let mid = it.name + "." + mb.name;
+            // A member of an item added after it: the item's own badge
+            // covers members that came with it.
+            let b = if since.contains_key(key) { "" } else { badge(since, key + "::" + mb.name) };
+            let is_fn = mb.sig.contains("fn ");
+            let code = link_types(if is_fn { sig_named(mb.sig, mb.name) } else { sig_html(mb.sig) }, types, from, here);
+            // A heading of its own, so it has an address and a place in the
+            // page's outline; the `self` anchor links to it.
+            out.push_str(f"<li><div class=\"m-h\"><h4 id=\"{esc(mid)}\"><code>{code}</code><a class=\"self\" href=\"#{esc(mid)}\" aria-label=\"Link to {esc(mb.name)}\">§</a></h4>{b}{src_link(if mb.file.is_empty() { file } else { mb.file }, mb.line, at)}</div>{md(mb.doc)}</li>");
+            if is_fn {
+                heads.push(Heading { level: 3, id: mid, text: f"{path}::{it.name}::{mb.name}" });
+                notes.insert(mid, "method\t" + summary(mb.doc).replace("`", ""));
+            }
+        }
+        out.push_str("</ul>");
+    }
+    if it.traits.len() > 0 {
+        out.push_str("<details class=\"impls grow\"><summary>Trait implementations ");
+        out.push_str(f"{it.traits.len()}</summary><ul>");
+        for t in it.traits { out.push_str(f"<li><code>{link_types(nabi_syntax::highlight_nabi(t), types, from, here)}</code></li>"); }
+        out.push_str("</ul></details>");
+    }
+    out.push_str("</section>");
+    out.to_str()
+}
+
+/// Where re-export `r` points from page `from`, and the id it takes
+/// there (`struct.BufReader`, as on its defining page; `mod.buffer` for a
+/// module); empty when it names nothing scanned.
+fn reexport_at(r: Reexport, from: str) -> (str, str) {
+    let q = r.module ?? { return ("", ""); };
+    if let it: Item = r.item {
+        let id = anchor(it);
+        let page = if moves_out(q, it) { sub_out(q, id) } else { q.out };
+        return ((if page == from { "" } else { rel(from, page) }) + "#" + id, it.kind + "." + r.name);
+    }
+    if r.name == "*" { return (rel(from, q.out), ""); }
+    (rel(from, q.out), "mod." + r.name)
+}
+
+/// A `pub use` item: its line, and each name it brings in, anchored here
+/// by the defining item's id and linked to its page, so
+/// `io.html#struct.BufReader` finds `BufReader` re-exported from
+/// `io::buffer`.
+fn use_html(it: Item, m: Module, mods: List<Module>, at: str, types: Dict<str, str>) -> str {
+    let id = anchor(it);
+    let own: Set<str> = Set::new();
+    for x in m.items {
+        if x.kind != "use" { own.insert(anchor(x)); }
+    }
+    let out = StrBuf::new();
+    out.push_str(f"<section class=\"api-item\" id=\"{esc(id)}\"><h3><a href=\"#{esc(id)}\">{esc(it.name)}</a>{src_link(if it.file.is_empty() { m.file } else { it.file }, it.line, at)}</h3>");
+    out.push_str(f"<pre class=\"sig\"><code>{link_types(sig_html(it.sig), types, m.out, "")}</code></pre>");
+    out.push_str(md(it.doc));
+    out.push_str("<ul class=\"api-list reexports\">");
+    for r in web::apidoc::reexports(m, it, mods) {
+        let (href, rid) = reexport_at(r, m.out);
+        let label = if r.name == "*" { r.path } else { r.name };
+        let what = "";
+        if let x: Item = r.item {
+            let renamed = if x.name != r.name { f"<code>{esc(x.name)}</code>: " } else { "" };
+            what = renamed + inline(summary(x.doc));
+        } else if let q: Module = r.module {
+            what = mod_summary(q, Dict::new(), m.out);
+        }
+        // Not when an item of this module already has the id.
+        let attr = if rid.is_empty() || own.contains(rid) { "" } else { f" id=\"{esc(rid)}\"" };
+        let name = if href.is_empty() { f"<code>{esc(label)}</code>" } else { f"<a href=\"{href}\"><code>{esc(label)}</code></a>" };
+        out.push_str(f"<li{attr}>{name} <span>{what}</span></li>");
+        own.insert(rid);
+    }
+    out.push_str("</ul></section>");
+    out.to_str()
+}
+
+/// A module's `//!` doc as its intro on page `from`: the repeated
+/// module path dropped, and spec references in parentheses linked to the standard
+/// library spec section (`spec` maps `2.9.2` to its page and anchor) or,
+/// when they name no section there, dropped.
+fn intro(m: Module, spec: Dict<str, str>, from: str) -> str {
+    let d = m.doc;
+    for sep in [" - ", " -- ", ": "] {
+        if let r: str = d.strip_prefix(m.path + sep) {
+            d = r;
+            break;
+        }
+    }
+    let out = StrBuf::new();
+    let rest = d;
+    loop {
+        let k = rest.find("(") ?? rest.len();
+        out.push_str(rest[:k]);
+        if k == rest.len() { break; }
+        rest = rest[k:];
+        let e = rest.find(")") ?? 0;
+        let inner = if e > 0 { rest[1:e].replace("\n", " ") } else { "" };
+        let words: List<str> = List::new();
+        for w in inner.split_whitespace() { words.push(w); }
+        let num = if words.len() > 0 { words[words.len() - 1].trim_end_matches(".") } else { "" };
+        let named = words.len() <= 3 && is_sec(num);
+        for k2 in 0..words.len() - (if words.len() > 0 { 1 } else { 0 }) {
+            let w = words[k2];
+            if !(w == "stdlib" || w == "spec" || w == "refs-lang" || w == "refs-standard-libraries") { named = false; }
+        }
+        if !named {
+            out.push_str("(");
+            rest = rest[1:];
+            continue;
+        }
+        let stdlib = !inner.contains("refs-lang");
+        let found: str | none = if stdlib { spec.get(num) } else { none };
+        if let to: str = found {
+            out.push_str(f"([stdlib spec {num}]({rel(from, to)}))");
+        } else if out.to_str().ends_with(" ") && rest[e + 1:].starts_with(" ") {
+            rest = rest[1:];
+        }
+        rest = rest[e + 1:];
+    }
+    out.to_str()
+}
+
+/// `2.9.2`-like: digits and dots, at least one dot.
+fn is_sec(s: str) -> bool {
+    if !s.contains(".") || s.starts_with(".") { return false; }
+    for c in s.chars() {
+        if !(c == '.' || (c >= '0' && c <= '9')) { return false; }
+    }
+    true
+}
+
+/// A module page's body and its section headings (for search / TOC).
+pub fn body(m: Module, mods: List<Module>, since: Dict<str, str>, notes: Dict<str, str>, at: str, spec: Dict<str, str>, types: Dict<str, str>) -> (str, List<Heading>) {
+    let heads: List<Heading> = List::new();
+    let out = StrBuf::new();
+    // The path in full, to copy; the breadcrumb above links up.
+    out.push_str("<h1><code>" + esc(m.path).replace("::", "::<wbr>") + "</code></h1>");
+    out.push_str(md(intro(m, spec, m.out)));
+    if m.children.len() > 0 {
+        out.push_str("<h2 id=\"modules\">Modules</h2><ul class=\"api-list\">");
+        heads.push(Heading { level: 2, id: "modules", text: "Modules" });
+        for c in m.children {
+            if let cm: Module = find(mods, m.path + "::" + c) {
+                out.push_str(f"<li><a href=\"{rel(m.out, cm.out)}\"><code>{esc(c)}</code></a> <span>{mod_summary(cm, spec, m.out)}</span></li>");
+            }
+        }
+        out.push_str("</ul>");
+    }
+    for (kind, label) in KINDS {
+        let its: List<Item> = List::new();
+        for it in m.items {
+            if it.kind == kind { its.push(it); }
+        }
+        if its.len() == 0 { continue; }
+        out.push_str(f"<h2 id=\"{kind}\">{label}</h2>");
+        heads.push(Heading { level: 2, id: kind, text: label });
+        for it in its {
+            if kind != "use" { heads.push(Heading { level: 3, id: anchor(it), text: m.path + "::" + it.name }); }
+            if kind == "use" {
+                out.push_str(use_html(it, m, mods, at, types));
+            } else if moves_out(m, it) {
+                out.push_str(stub_html(m, it, anchor(it), it.name, since, types));
+            } else {
+                out.push_str(item_html(it, anchor(it), it.name, heads, m, since, notes, at, types, m.out));
+            }
+        }
+    }
+    if m.impls.len() > 0 {
+        out.push_str("<h2 id=\"impl\">Implementations</h2>");
+        heads.push(Heading { level: 2, id: "impl", text: "Implementations" });
+        for it in m.impls {
+            heads.push(Heading { level: 3, id: "impl." + it.name, text: "impl " + it.name });
+            if moves_out(m, it) {
+                out.push_str(stub_html(m, it, "impl." + it.name, "impl " + it.name, since, types));
+            } else {
+                out.push_str(item_html(it, "impl." + it.name, "impl " + it.name, heads, m, since, notes, at, types, m.out));
+            }
+        }
+    }
+    (out.to_str(), heads)
+}
+
+/// The pages of `m`'s items that moved out (none unless `m` is split).
+pub fn subpages(m: Module, since: Dict<str, str>, at: str, types: Dict<str, str>) -> List<Sub> {
+    let subs: List<Sub> = List::new();
+    let all: List<(Item, str, str)> = List::new();
+    for it in m.items {
+        if it.kind != "use" { all.push((it, anchor(it), it.name)); }
+    }
+    for it in m.impls { all.push((it, "impl." + it.name, "impl " + it.name)); }
+    for (it, id, title) in all {
+        if !moves_out(m, it) { continue; }
+        let out = sub_out(m, id);
+        let heads: List<Heading> = List::new();
+        let notes: Dict<str, str> = Dict::new();
+        let b = StrBuf::new();
+        b.push_str("<h1><code>" + esc(m.path + "::" + title).replace("::", "::<wbr>") + "</code></h1>");
+        b.push_str(item_html(it, id, title, heads, m, since, notes, at, types, out));
+        subs.push(Sub { out: out, title: m.path + "::" + title, kind: kind_label(it.kind), html: b.to_str(), heads: heads, notes: notes });
+    }
+    subs
+}
+
+fn segs(path: str) -> List<str> {
+    let out: List<str> = List::new();
+    for p in path.split("::") { out.push(p); }
+    out
+}
+
+fn find(mods: List<Module>, path: str) -> Module | none {
+    for m in mods {
+        if m.path == path { return m; }
+    }
+    none
+}
+
+const TIERS: [str; 3] = ["bare", "core", "std"];
+
+/// The label of an item's kind in the breadcrumb of its own page.
+fn kind_label(kind: str) -> str {
+    for (k, label) in [("struct", "Struct"), ("enum", "Enum"), ("trait", "Trait"), ("type", "Type alias"), ("impl", "Implementation")] {
+        if k == kind { return label; }
+    }
+    "Item"
+}
+
+/// Sidebar of page `from` (`m`'s, or one of its items' own, `here` its
+/// id): web::apidoc::nav's, the modules of `m`'s tier as a tree, the
+/// module's items and the other tiers. `version` is shown by the tier.
+pub fn sidebar(m: Module, mods: List<Module>, from: str, here: str, version: str) -> str {
+    let tier = segs(m.path)[0];
+    let root = tier;
+    let tree = nav::tree(mods, m, root, |q: Module| rel(from, q.out));
+    // On an item's own page that item is the page, not its module.
+    if !here.is_empty() { tree = tree.replace("aria-current=\"page\"", "aria-current=\"true\""); }
+    let items = nav::items(m, root, |it: Item, id: str| if moves_out(m, it) { rel(from, sub_out(m, id)) } else if from == m.out { "#" + id } else { rel(from, m.out) + "#" + id }, here);
+    let others: List<nav::Package> = List::new();
+    for t in TIERS {
+        if t == tier { continue; }
+        if let q: Module = find(mods, t) { others.push(nav::Package { name: q.path, href: rel(from, q.out) }); }
+    }
+    let top = find(mods, root) ?? m;
+    let side = nav::side(nav::Package { name: root, version: version, href: rel(from, top.out), here: m.path == root }, tree, items, "Standard library", others);
+    // The tier is the page's ancestor on an item's own page of its root.
+    if here.is_empty() { side } else { side.replace("\" aria-current=\"page\"><span>", "\" aria-current=\"true\"><span>") }
+}
+
+/// The breadcrumb of module `m`'s page.
+pub fn crumb(m: Module, mods: List<Module>) -> str {
+    let root = segs(m.path)[0];
+    nav::crumb(nav::kind_of(m, root), nav::trail(mods, m, root, |q: Module| rel(m.out, q.out)))
+}
+
+/// The breadcrumb of item page `s` of module `m`.
+fn sub_crumb(m: Module, mods: List<Module>, s: Sub) -> str {
+    let root = segs(m.path)[0];
+    let t = nav::trail(mods, m, root, |q: Module| rel(s.out, q.out));
+    t.push((s.title[m.path.len() + 2:], s.out[(s.out.rfind("/") ?? 0) + 1:]));
+    nav::crumb(s.kind, t)
+}
+
+/// "On this page" of an API page (web::apidoc::nav::rail): its sections,
+/// and each item's methods under it.
+pub fn toc(heads: List<Heading>) -> str {
+    let hs: List<nav::Head> = List::new();
+    for h in heads {
+        let item = false;
+        for k in ["struct.", "enum.", "trait.", "type.", "fn.", "const.", "static.", "impl."] {
+            if h.id.starts_with(k) { item = true; }
+        }
+        let level = if h.level == 2 { 2usize } else if item { 3usize } else { 4usize };
+        hs.push(nav::Head { level: level, id: h.id, text: h.text });
+    }
+    nav::rail(hs)
+}
+
+/// `/std/index.html`: the tiers and their modules.
+pub fn index(mods: List<Module>, spec: Dict<str, str>) -> str {
+    let out = StrBuf::new();
+    out.push_str("<h1>Standard library API</h1>");
+    out.push_str("<p>API listing generated from the public items and doc comments of the standard library sources (<code>library/</code>). Behavior and guarantees are defined in the <a href=\"../spec/refs-standard-libraries/index.html\">standard library specification</a>.</p>");
+    for (tier, what) in [("bare", "The lowest layer: pointers, memory, FFI"), ("core", "Collections, numbers, iterators, formatting, synchronization, tasks. Available to all code automatically"), ("std", "Files, networking, time, threads, processes, environment, NABION")] {
+        out.push_str(f"<h2 id=\"{tier}\"><code>{tier}</code></h2><p>{what}.</p><ul class=\"api-list\">");
+        for q in mods {
+            if q.path == tier || q.path.starts_with(tier + "::") {
+                out.push_str(f"<li><a href=\"{rel("std/index.html", q.out)}\"><code>{esc(q.path)}</code></a> <span>{mod_summary(q, spec, "std/index.html")}</span></li>");
+            }
+        }
+        out.push_str("</ul>");
+    }
+    out.to_str()
+}
+
+/// For the "Added in" badges: each API item and member that the first
+/// release of `site.history` lacks, mapped to the release that added it.
+pub fn added_in(site: Site, mods: List<web::apidoc::Module>) throws -> Dict<str, str> {
+    let since: Dict<str, str> = Dict::new();
+    if site.history.len() == 0 || site.built_from.is_empty() { return since; }
+    let seen = keys(try collect(site.history[0].library));
+    for h in site.history[1..] {
+        for k in keys(try collect(h.library)) {
+            if !seen.contains(k) {
+                since.insert(k, h.release);
+                seen.insert(k);
+            }
+        }
+    }
+    for k in keys(mods) {
+        if !seen.contains(k) { since.insert(k, site.built_from); }
+    }
+    since
+}
+
+/// The standard library API (`std/<tier>/<module>.html`, from the
+/// library's English doc comments) as fragments into `out`, and `ko/std/`
+/// the same in Korean chrome; the modules and each language's API pages,
+/// for search. `spec` (the English spec pages) has the sections the
+/// modules point at.
+pub fn frags(site: Site, spec: List<Page>, out: Dict<str, Frag>) throws -> (List<Module>, List<Page>, List<Page>) {
+    let api: List<Page> = List::new();
+    let mods = try collect(site.library);
+    let since = try added_in(site, mods);
+    let spec_secs = pkg::spec::sections(spec);
+    let types = type_index(mods);
+    let src_ref = if site.version == "dev" || site.built_from.is_empty() { "main" } else { "v" + site.built_from };
+    let shown = if site.version == "dev" { "dev" } else if site.built_from.is_empty() { site.version } else { site.built_from };
+    for m in mods {
+        let notes: Dict<str, str> = Dict::new();
+        let (html, heads) = body(m, mods, since, notes, src_ref, spec_secs, types);
+        out.insert(m.out, Frag { out: m.out, title: m.path, side: sidebar(m, mods, m.out, "", shown), toc: toc(heads), body: html, pager: "", head: "", trail: crumb(m, mods) });
+        for s in subpages(m, since, src_ref, types) {
+            let id = s.out[(s.out.rfind("/") ?? 0) + 1:s.out.len() - ".html".len()];
+            out.insert(s.out, Frag { out: s.out, title: s.title, side: sidebar(m, mods, s.out, id, shown), toc: toc(s.heads), body: s.html, pager: "", head: "", trail: sub_crumb(m, mods, s) });
+            api.push(Page { src: "", out: s.out, dir: "std", title: s.title, html: "", heads: s.heads, notes: s.notes });
+        }
+        api.push(Page { src: "", out: m.out, dir: "std", title: m.path, html: "", heads: heads, notes: notes });
+    }
+    out.insert("std/index.html", Frag { out: "std/index.html", title: "Standard library API", side: "", body: index(mods, spec_secs), pager: "", head: "" });
+    let (bare, all) = coverage(mods);
+    if bare > 0 { eprintln(f"note: {bare} of {all} public API items and members have no doc comment"); }
+    let api_ko: List<Page> = List::new();
+    for p in api { api_ko.push(Page { src: "", out: "ko/" + p.out, dir: "ko/std", title: p.title, html: "", heads: p.heads, notes: p.notes }); }
+    let api_note = "<p class=\"tr-note\">API 참조는 영어로만 있습니다. 표준 라이브러리 소스의 영어 문서 주석에서 만듭니다.</p>\n";
+    let std_outs: List<str> = List::new();
+    for o in out.keys() {
+        if o.starts_with("std/") { std_outs.push(o); }
+    }
+    for o in std_outs {
+        let f = out[o];
+        let text = if let k: usize = f.body.find("</h1>") { f.body[:k + 5] + "\n" + api_note + "<div lang=\"en\">\n" + f.body[k + 5:] + "</div>\n" } else { api_note + "<div lang=\"en\">\n" + f.body + "</div>\n" };
+        out.insert("ko/" + o, Frag { out: "ko/" + o, title: f.title, side: f.side, toc: f.toc, body: text, pager: "", head: "", alt: o, noindex: true, trail: f.trail });
+        f.alt = "ko/" + o;
+        out.insert(o, f);
+    }
+    (mods, api, api_ko)
+}
+
+#[test]
+fn reexport_ids() {
+    let it = |name: str| Item { kind: "use", name: name, sig: "", doc: "", members: List::new(), traits: List::new() };
+    assert(anchor(it("list::{List, ListIter, ListIntoIter}")) == "reexport.List.ListIter.ListIntoIter", anchor(it("list::{List, ListIter, ListIntoIter}")));
+    assert(anchor(it("std::io::SeekFrom")) == "reexport.SeekFrom", "path");
+    assert(anchor(it("heap::BinaryHeap")) == "reexport.BinaryHeap", "one");
+}
+
+#[test]
+fn signature_pieces() {
+    // The head, each parameter, the return type; `fn(T) -> bool` inside a
+    // parameter stays whole.
+    let h = sig_html("pub fn retain(self, keep: fn(T) -> bool) -> List<T>");
+    assert(h.split("class=\"nw\"").count() == 5, h);
+    assert(h.contains("<wbr><span") && !h.contains("( ") && !h.contains("<span class=\"nw\"> "), h);
+    assert(sig_html("pub struct List<T>").split("class=\"nw\"").count() == 1, "not a fn");
+}
+
+#[test]
+fn reexports_anchored() {
+    let io = web::apidoc::scan("core::io", "std/core/io.html", "pub mod buffer;\n/// Buffers.\npub use core::io::buffer::{BufReader, LineWriter as Lines};\npub use buffer::*;\n");
+    let buffer = web::apidoc::scan("core::io::buffer", "std/core/io/buffer.html", "/// Reads in chunks. More.\npub struct BufReader {}\npub struct LineWriter {}\n");
+    let mods = [io, buffer];
+    let (html, heads) = body(io, mods, Dict::new(), Dict::new(), "main", Dict::new(), Dict::new());
+    assert(html.contains("<li id=\"struct.BufReader\"><a href=\"io/buffer.html#struct.BufReader\"><code>BufReader</code></a> <span>Reads in chunks.</span></li>"), html);
+    assert(html.contains("<li id=\"struct.Lines\"><a href=\"io/buffer.html#struct.LineWriter\"><code>Lines</code></a> <span><code>LineWriter</code>: </span></li>"), html);
+    assert(html.contains("<li><a href=\"io/buffer.html\"><code>core::io::buffer::*</code></a>"), html);
+    // Search keeps pointing at the defining page.
+    for h in heads { assert(!h.id.starts_with("struct."), h.id); }
+}
+
+#[test]
+fn private_reexports_inline() {
+    let files: Dict<str, str> = Dict::new();
+    files.insert("core/src/lib.nabi", "pub mod io;\n");
+    files.insert("core/src/io.nabi", "mod buffer;\npub mod open;\npub use core::io::buffer::BufReader;\npub use core::io::open::Cursor;\n");
+    files.insert("core/src/io/buffer.nabi", "/// Reads in chunks. More.\npub struct BufReader {}\nimpl BufReader {\n    /// Makes one.\n    pub fn new() -> BufReader { BufReader {} }\n}\n");
+    files.insert("core/src/io/open.nabi", "/// A cursor.\npub struct Cursor {}\n");
+    let mods = web::apidoc::pages(web::apidoc::walk(|p| files.get(p), "core/src/lib.nabi", "core", "std/core/index.html"));
+    assert(mods.len() == 3 && mods[1].out == "std/core/io.html", "pages");
+    let io = mods[1];
+    let notes: Dict<str, str> = Dict::new();
+    let (html, heads) = body(io, mods, Dict::new(), notes, "main", Dict::new(), type_index(mods));
+    assert(html.contains("<section class=\"api-item\" id=\"struct.BufReader\"><h3><a href=\"#struct.BufReader\">BufReader</a><a class=\"src\" href=\"https://github.com/nabi-lang/nabi/blob/main/library/core/src/io/buffer.nabi#L2\">Source</a></h3>"), html);
+    assert(html.contains("id=\"BufReader.new\"") && html.contains("buffer.nabi#L5"), "members, from their file");
+    assert(html.contains("<li id=\"struct.Cursor\"><a href=\"io/open.html#struct.Cursor\"><code>Cursor</code></a>"), "a public module's item stays a link");
+    let ids: List<str> = List::new();
+    for h in heads { ids.push(h.id); }
+    assert(ids.contains("struct.BufReader") && ids.contains("BufReader.new") && !ids.contains("struct.Cursor"), ids.join(" "));
+    // The item is the sidebar's; "On this page" has its methods.
+    assert(toc(heads).contains("<summary><code>BufReader</code><span class=\"ct\">1</span></summary><ul><li class=\"m\"><a href=\"#BufReader.new\">") && !toc(heads).contains("href=\"#struct.BufReader\"") && notes.contains_key("struct.BufReader"), toc(heads));
+    let side = sidebar(io, mods, io.out, "", "dev");
+    assert(side.contains("<a href=\"#struct.BufReader\">BufReader</a>") && side.contains("<a href=\"io.html\" aria-current=\"page\">io<span class=\"ct\" aria-hidden=\"true\">1</span></a>") && side.contains("<h2 class=\"t-label\">In <code>io</code></h2>") && side.contains("<p class=\"api-pkg\"><a href=\"index.html\"><span>core</span><small>dev</small></a></p>"), side);
+    let top = sidebar(mods[0], mods, mods[0].out, "", "dev");
+    assert(top.contains("<p class=\"api-pkg\"><a href=\"index.html\" aria-current=\"page\"><span>core</span>") && top.contains("<ul class=\"api-tree\"><li><a href=\"io.html\">io<span class=\"ct\" aria-hidden=\"true\">1</span></a>"), top);
+    assert(crumb(io, mods).contains("<a href=\"index.html\">core</a>") && crumb(io, mods).contains("aria-current=\"page\">io</a>"), crumb(io, mods));
+    assert(type_index(mods)["BufReader"] == "std/core/io.html#struct.BufReader", "types link to the page that shows them");
+}

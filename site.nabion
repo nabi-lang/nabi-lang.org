@@ -1,0 +1,17 @@
+// Site configuration (read by src/main.nabi).
+Site {
+    title: "Nabi",
+    tagline: "Clear rules, free as a butterfly.",
+    description: "Clear rules, free as a butterfly. Nabi is a compiled programming language with closed sum types, no null, and errors in function signatures: native programs, a package registry, a REPL, and Jupyter.",
+    // What the home and download pages offer while versions.nabion
+    // lists no release yet; the newest release there wins.
+    release: "0.1.0",
+    base_url: "https://nabi-lang.org",
+    spec: "../spec/en",
+    spec_ko: "../spec/ko",
+    spec_repo: "https://github.com/nabi-lang/spec",
+    spec_branch: "main",
+    packages: "https://packages.nabi-lang.org",
+    library: "../nabi/library",
+    out: "public",
+}

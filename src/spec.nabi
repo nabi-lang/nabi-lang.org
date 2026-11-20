@@ -1,0 +1,258 @@
+// The spec pages (English at `spec/`, Korean at `ko/spec/`): sources,
+// links between them and to the repository, the breadcrumb and the
+// pairing of each page with its other edition.
+
+use pkg::layout;
+use pkg::layout::rel;
+use pkg::links::{join, norm};
+use pkg::{Frag, Page, Site, edit_url, hreflang, updated};
+use markdown::Heading;
+use std::fs;
+use web::build::dir_of;
+
+/// Output path of a spec source: `x/README.md` -> `spec/x/index.html`.
+fn out_of(src: str) -> str {
+    if src == "README.md" { return "spec/index.html"; }
+    if let s: str = src.strip_suffix("/README.md") { return "spec/" + s + "/index.html"; }
+    if let s: str = src.strip_suffix(".md") { return "spec/" + s + ".html"; }
+    "spec/" + src
+}
+
+fn last_seg(p: str) -> str {
+    let t = norm(p);
+    if let k: usize = t.rfind("/") { return t[k + 1:]; }
+    t
+}
+
+/// The `href` for a link written in `src_dir` of the edition in `spec`
+/// (output under `prefix`), from the page `out`.
+fn link(site: Site, spec: str, prefix: str, href: str, src_dir: str, out: str) -> str {
+    if href.starts_with("#") || href.contains("://") || href.starts_with("mailto:") { return href; }
+    let path = href;
+    let frag = "";
+    if let k: usize = href.find("#") {
+        path = href[:k];
+        frag = href[k:];
+    }
+    let target = norm(join(src_dir, path));
+    if target == ".." || target.starts_with("../") {
+        // The other edition (`../ko/README.md`): its pages here.
+        for (ed, pre) in [("en", ""), ("ko", "ko/")] {
+            if pre == "ko/" && site.spec_ko.is_empty() { continue; }
+            let top = "../" + ed;
+            if target != top && !target.starts_with(top + "/") { continue; }
+            let r = target[top.len():].trim_start_matches("/");
+            let file = if r.is_empty() {
+                "README.md"
+            } else if r.ends_with(".md") {
+                r
+            } else if !last_seg(r).contains(".") {
+                layout::readme_of(r)
+            } else {
+                ""
+            };
+            if !file.is_empty() { return rel(out, pre + out_of(file)) + frag; }
+        }
+        // Anything else outside the language directory: the spec repository.
+        let in_repo = norm(last_seg(spec) + "/" + target);
+        return f"{site.spec_repo}/blob/{site.spec_branch}/{in_repo}{frag}";
+    }
+    let file = if target.ends_with(".md") {
+        target
+    } else if !last_seg(target).contains(".") {
+        layout::readme_of(target)
+    } else {
+        target
+    };
+    rel(out, prefix + out_of(file)) + frag
+}
+
+/// `"3.11.4. Patterns"` -> `"3.11.4."`; `""` if unnumbered.
+fn sec_no(t: str) -> str {
+    let w = t;
+    if let k: usize = t.find(" ") { w = t[:k]; }
+    if !w.ends_with(".") { return ""; }
+    let first = true;
+    for c in w.chars() {
+        let ok = if first { c >= '0' && c <= '9' } else { (c >= '0' && c <= '9') || c == '.' || (c >= 'a' && c <= 'z') };
+        if !ok { return ""; }
+        first = false;
+    }
+    w
+}
+
+/// Heading ids of `a` paired with those of `b` as `"a1 b1 a2 b2 ..."`:
+/// by position when the outlines match, else by section number (an
+/// unnumbered heading goes to its numbered section).
+fn sec_map(a: List<Heading>, b: List<Heading>) -> str {
+    let same = a.len() == b.len();
+    for k in 0..a.len() {
+        if !same { break; }
+        if sec_no(a[k].text) != sec_no(b[k].text) { same = false; }
+    }
+    let by: Dict<str, str> = Dict::new();
+    for h in b {
+        let n = sec_no(h.text);
+        if !n.is_empty() && (by.get(n) ?? "").is_empty() { by.insert(n, h.id); }
+    }
+    let out = StrBuf::new();
+    let last = "";
+    for k in 0..a.len() {
+        let n = sec_no(a[k].text);
+        if !n.is_empty() { last = by.get(n) ?? ""; }
+        let to = if same { b[k].id } else { last };
+        if to.is_empty() { continue; }
+        if !out.is_empty() { out.push(' '); }
+        out.push_str(a[k].id + " " + to);
+    }
+    out.to_str()
+}
+
+/// The other edition's page of `p` among `others` (the same source), with
+/// the heading pairs for search.js; `("", "")` if it has none.
+pub fn twin(p: Page, others: List<Page>) -> (str, str) {
+    for o in others {
+        if o.src == p.src { return (o.out, sec_map(p.heads, o.heads)); }
+    }
+    ("", "")
+}
+
+/// The edit link of spec page `p` of the edition in `spec`.
+pub fn edit(site: Site, spec: str, p: Page, upd: Dict<str, str>) -> str {
+    let path = f"{last_seg(spec)}/{p.src}";
+    layout::edit_link(edit_url(site, site.spec_repo, site.spec_branch, path), upd.get(path) ?? "", p.out.starts_with("ko/"))
+}
+
+pub fn root(dir: str) -> str {
+    let d = norm(dir);
+    if dir.starts_with("/") { d = "/" + d; }
+    d
+}
+
+/// The chapters between spec page `pages[k]` and its section's index
+/// (layout::section), outermost first, as breadcrumb links.
+pub fn crumb(pages: List<Page>, k: usize) -> str {
+    let p = pages[k];
+    let ko = p.out.starts_with("ko/");
+    let (_, _, _, index) = layout::section(if ko { p.out["ko/".len():] } else { p.out });
+    if index.is_empty() { return ""; }
+    let top = layout::in_lang(index, ko);
+    if p.out == top { return ""; }
+    let chain: List<str> = List::new();
+    let d = p.dir;
+    while !d.is_empty() {
+        let readme = layout::readme_of(d);
+        let up = dir_of(d);
+        for q in pages {
+            if q.src != readme || q.out == top || q.out == p.out { continue; }
+            chain.push(f"<span class=\"sep\" aria-hidden=\"true\">/</span><a href=\"{rel(p.out, q.out)}\">{markdown::esc(q.title)}</a>");
+        }
+        // Stop at the section's own directory.
+        if top.ends_with(readme.replace("README.md", "index.html")) { break; }
+        d = up;
+    }
+    chain.reverse();
+    chain.join("")
+}
+
+/// The spec edition in `spec`, rendered under `prefix` (`""`, `"ko/"`).
+pub fn pages(site: Site, spec: str, prefix: str, ko: bool) throws -> List<Page> {
+    let srcs: List<str> = List::new();
+    try for e in fs::walk(spec) {
+        let p = e.path().as_str();
+        if e.is_file() && p.ends_with(".md") { srcs.push(p[spec.len() + 1:]); }
+    }
+    sort_sources(srcs);
+    let pages: List<Page> = List::new();
+    for src in srcs {
+        let out = prefix + out_of(src);
+        let dir = dir_of(src);
+        let text = try fs::read_to_str(spec + "/" + src);
+        if src == "README.md" { text = intro(text); }
+        let doc = layout::md(text, |h| link(site, spec, prefix, h, dir, out), ko);
+        let title = if doc.title.is_empty() { src } else { doc.title };
+        pages.push(Page { src: src, out: out, dir: dir, title: title, html: doc.html, heads: doc.headings });
+    }
+    pages
+}
+
+/// The spec's README as the spec's own introduction: without what only
+/// the repository needs (the language switch, the maintainer line, the
+/// table of project links), and naming itself the specification rather
+/// than the repository. Text it does not find is left alone.
+fn intro(text: str) -> str {
+    let out = StrBuf::new();
+    let table = false;
+    for l in text.split("\n") {
+        let t = l.trim();
+        // The page has its own language switch.
+        if t.contains("English") && t.contains("한국어") && t.contains("·") && t.char_count() < 60 { continue; }
+        if t.starts_with("Designed and maintained by") || t.starts_with("설계와 유지보수는") { continue; }
+        if t.starts_with("|") {
+            if !table && (t.contains("GitHub organization") || t.contains("GitHub 조직") || t.contains("| What ") || t.contains("| 자리 ")) { table = true; }
+            if table { continue; }
+        } else {
+            table = false;
+        }
+        out.push_str(l);
+        out.push('\n');
+    }
+    let s = out.to_str();
+    // Blank lines the dropped blocks leave behind.
+    while s.contains("\n\n\n") { s = s.replace("\n\n\n", "\n\n"); }
+    for (from, to) in [
+        ("this repository is its formal specification", "this is its formal specification"),
+        ("live in a separate repository; this one holds", "live in a separate repository; the specification holds"),
+        ("The repository has a fixed shape.", "The specification has a fixed shape."),
+        ("이 저장소는 그 언어의 형식 사양", "이 문서는 그 언어의 형식 사양"),
+        ("저장소는 정해진 모양으로", "사양은 정해진 모양으로"),
+    ] {
+        s = s.replace(from, to);
+    }
+    s
+}
+
+/// README first within each directory, then by name.
+fn sort_key(src: str) -> str { src.replace("README.md", "!") }
+
+pub fn sort_sources(xs: List<str>) {
+    for i in 1..xs.len() {
+        let x = xs[i];
+        let j = i;
+        while j > 0 && sort_key(xs[j - 1]) > sort_key(x) {
+            xs[j] = xs[j - 1];
+            j -= 1;
+        }
+        xs[j] = x;
+    }
+}
+
+/// The standard library spec's numbered sections: `2.9.2` -> its page and
+/// anchor (`spec/refs-standard-libraries/.../209-collections.html#292-list`).
+pub fn sections(pages: List<Page>) -> Dict<str, str> {
+    let out: Dict<str, str> = Dict::new();
+    for p in pages {
+        if !p.src.starts_with("refs-standard-libraries/") { continue; }
+        for h in p.heads {
+            let n = sec_no(h.text).trim_end_matches(".");
+            if !n.is_empty() && !out.contains_key(n) { out.insert(n, if h.level == 1 { p.out } else { p.out + "#" + h.id }); }
+        }
+    }
+    out
+}
+
+/// Both editions' pages as fragments into `out`: each with its sidebar,
+/// pager, edit link and breadcrumb, and the hreflang links to its page in
+/// the other edition.
+pub fn frags(site: Site, pages: List<Page>, ko_pages: List<Page>, out: Dict<str, Frag>) {
+    let upd = updated(dir_of(root(site.spec)));
+    for (eds, others, spec, ko) in [(pages, ko_pages, site.spec, false), (ko_pages, pages, site.spec_ko, true)] {
+        for k in 0..eds.len() {
+            let p = eds[k];
+            let (alt, sec) = twin(p, others);
+            // Each spec page names its other edition for search engines.
+            let head = if alt.is_empty() { "" } else { hreflang(site, if ko { alt } else { p.out }, if ko { p.out } else { alt }) };
+            out.insert(p.out, Frag { out: p.out, title: p.title, side: layout::sidebar(eds, k), toc: layout::toc(p), body: p.html + edit(site, spec, p, upd), pager: layout::pager(eds, k, ko), head: head, alt: alt, sec: sec, crumb: crumb(eds, k) });
+        }
+    }
+}
