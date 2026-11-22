@@ -33,6 +33,7 @@ mod home;
 mod layout;
 mod links;
 mod llms;
+mod pkgdocs;
 mod search;
 mod serve;
 mod spec;
@@ -96,6 +97,10 @@ pub struct Site {
     pub packages: str;
     /// The standard library sources (`bare/src/`, `core/src/`, `std/src/`).
     pub library: str = "../nabi/library";
+    /// The package docs the registry made (pkgdocs::sync): a directory of
+    /// index.nabion and <name>/<version>.nabion; `""` builds none.
+    /// $NABI_PKG_DOCS overrides it (the server's builds).
+    pub pkg_docs: str = "";
     pub out: str = "public";
     /// The release this build documents (`0.1.2`), and the earlier
     /// releases of its version, oldest first: what the API's "Added in"
@@ -175,6 +180,10 @@ pub struct Frag {
     /// An API page's breadcrumb (web::apidoc::nav::crumb), shown in place
     /// of the section's; `""` on other pages.
     pub trail: str = "";
+    /// A package's docs page (pkgdocs): the version it shows and its
+    /// version menu's items; `""` on the toolchain's pages.
+    pub pkg_ver: str = "";
+    pub pkg_vers: str = "";
 }
 
 /// One released version's docs as fragments, plus its search index.
@@ -305,6 +314,10 @@ fn main() throws {
         _ = try home_check(true);
         return;
     }
+    if args.len() == 4 && args[1] == "pkgdocs-sync" {
+        println(if try pkgdocs::sync(args[2], args[3]) { "pkgdocs: updated" } else { "pkgdocs: up to date" });
+        return;
+    }
     if args.len() > 1 && args[1] == "code" {
         let bad = try code_check(if args.len() > 2 { args[2] } else { "" });
         if bad.len() > 0 { process::exit(1); }
@@ -422,6 +435,11 @@ fn main() throws {
     let latest = if version == newest { versions::Latest { pages: files, search: idx, search_ko: idx_ko, text: text, llms: llm } } else { versions::Latest { pages: Dict::new(), search: "", search_ko: "", text: ("", ""), llms: ("", "") } };
     let (latest2, arch_bad) = if archive.is_empty() { (latest, List::<str>::new()) } else { try versions::rewrap(ref site, vs, archive, docs_root, latest_outs, latest) };
     let has_latest = try versions::root(ref site, vs, docs_root, www_dir, latest_outs, latest_hidden, latest2);
+
+    // The packages' docs, in the chrome of the newest release's docs.
+    let pkg_dir = try env::var("NABI_PKG_DOCS") catch _ { site.pkg_docs };
+    let pkg_pages = if pkg_dir.is_empty() { 0usize } else { try pkgdocs::write(site, docs_root, pkg_dir, if has_latest { "latest" } else { version }) };
+    if pkg_pages > 0 { println(f"package docs: {pkg_pages} pages → {docs_root}/packages/"); }
 
     let bad = links::check(files, statics);
     for b in links::check(www, www_statics) { bad.push("www/" + b); }

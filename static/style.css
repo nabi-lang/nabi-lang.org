@@ -265,6 +265,9 @@ a.ecode:hover { text-decoration-style: solid; }
 .sections dd { color: var(--ink-2); font-size: 14px; line-height: 26px; }
 
 /* API pages */
+/* a package's docs: its page on the registry and its source, under the title */
+.prose .pkg-links { margin: -8px 0 20px; font-size: 14px; line-height: 20px; color: var(--ink-3); }
+.prose .pkg-links a { color: var(--ink-2); }
 .doc .prose > h1 code { font-weight: 500; font-size: 1em; letter-spacing: -0.03em; overflow-wrap: anywhere; }
 .prose h1 code a { color: var(--ink-3); }
 .api-item { padding: 24px 0 8px; border-top: 1px solid var(--line); }

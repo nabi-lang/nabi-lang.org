@@ -13,6 +13,7 @@
 //   NABI_WEB_DOCS_HOST   docs host name
 //   NABI_WEB_TYPST       typst, which draws the docs' link preview cards
 //   NABI_WEB_OG_FONTS    the fonts og/card.typ asks for (Geist, Pretendard)
+//   NABI_WEB_PACKAGES    the registry the packages' docs come from
 //
 // Environment first, then .env in the working directory.
 
@@ -47,6 +48,7 @@ pub struct Cfg {
     pub docs_host: str;
     pub typst: str;
     pub og_fonts: str;
+    pub packages: str;
 }
 
 #[derive(Nabion)]
@@ -91,6 +93,7 @@ pub fn load_cfg(path: str) throws -> Cfg {
         docs_host: setting(f, "NABI_WEB_DOCS_HOST", "docs.nabi-lang.org"),
         typst: setting(f, "NABI_WEB_TYPST", "/opt/nabi-og/typst"),
         og_fonts: setting(f, "NABI_WEB_OG_FONTS", "/opt/nabi-og/fonts"),
+        packages: setting(f, "NABI_WEB_PACKAGES", "https://packages.nabi-lang.org"),
     };
     for (k, v) in [("NABI_WEB_DATA", cfg.data), ("NABI_WEB_CONTENT", cfg.content)] {
         if v.is_empty() { throw ValueError::new(f"{k} is not set (environment or .env)"); }
@@ -258,6 +261,15 @@ fn round(cfg: Cfg, exe: str, build: str) throws {
         if try sync_bundle(cfg, repo, branch) { changed.insert(f"{repo}/{branch}"); }
     }
     if try sync_library(cfg, "main", "") { changed.insert("nabi/main"); }
+    // The packages' docs: the registry's index each round, a version's
+    // docs once (pkgdocs). A registry that does not answer keeps what
+    // was fetched.
+    let pkg_docs = cfg.data + "/pkgdocs";
+    let fetched = try pkg::pkgdocs::sync(pkg_docs, cfg.packages) catch e {
+        eprintln(f"round: package docs: {e}");
+        false
+    };
+    if fetched { changed.insert("packages"); }
     // A docs and spec branch can come before its nabi tag: leave that
     // release out until the tag is there.
     let tags = try nabi_tags(cfg);
@@ -307,7 +319,7 @@ fn round(cfg: Cfg, exe: str, build: str) throws {
     if fs::exists(next) { try fs::remove_dir_all(next); }
     let local = cfg.data + "/site.dev.nabion";
     try fs::write(local, site_local(cfg, "main", "main", "main", f"    out: \"{next}\",\n"));
-    try run_self(exe, [], [("NABI_SITE_LOCAL", local), ("NABI_VERSIONS", versions), ("NABI_DOCS_ARCHIVE", archive)]);
+    try run_self(exe, [], [("NABI_SITE_LOCAL", local), ("NABI_VERSIONS", versions), ("NABI_DOCS_ARCHIVE", archive), ("NABI_PKG_DOCS", pkg_docs)]);
     let old = cfg.data + "/out.old";
     if fs::exists(old) { try fs::remove_dir_all(old); }
     if fs::exists(out) { try fs::rename(out, old); }
@@ -388,6 +400,13 @@ const FOREVER: str = "public, max-age=31536000, immutable";
 pub fn cache_for(f: str, path: str, query: str, docs: bool) -> str {
     if f.ends_with(".html") {
         let first = (path[1:].split_once("/") ?? (path[1:], "")).0;
+        // A package version's docs change only when the registry's scan
+        // does; latest/ and the list follow new versions.
+        if docs && first == "packages" {
+            let rest = (path["/packages/".len():].split_once("/") ?? ("", "")).1;
+            let ver = (rest.split_once("/") ?? (rest, "")).0;
+            return if ver.split(".").count() == 3 { "public, max-age=86400, stale-while-revalidate=604800" } else { "public, max-age=300, stale-while-revalidate=86400" };
+        }
         let released = docs && first.split(".").count() == 3;
         return if released { "public, max-age=86400, stale-while-revalidate=604800" } else { "public, max-age=300, stale-while-revalidate=86400" };
     }
@@ -410,6 +429,12 @@ pub fn query_v(query: str) -> str {
 pub fn redirect(path: str, docs: bool) -> str | none {
     let c = url::canonical(path) ?? path;
     if docs && c == "/" { c = "/latest"; }
+    // A package's docs without a version: its newest.
+    if docs {
+        if let name: str = c.strip_prefix("/packages/") {
+            if !name.is_empty() && !name.contains("/") { c = c + "/latest"; }
+        }
+    }
     if c == path { none } else { c }
 }
 
@@ -636,6 +661,8 @@ fn redirects() {
     assert(to("/latest/learn/05-sum-types.html", true) == "/latest/learn/05-sum-types", ".html");
     assert(to("/0.1/learn/", true) == "/0.1/learn" && to("/0.1", true) == "-", "minor alias");
     assert(to("/download/", false) == "/download" && to("/nabi.css", false) == "-", "www");
+    assert(to("/packages/json", true) == "/packages/json/latest" && to("/packages/json/", true) == "/packages/json/latest", "a package's docs");
+    assert(to("/packages", true) == "-" && to("/packages/json/0.2.0", true) == "-" && to("/packages/json", false) == "-", "package docs pages");
     assert(query_v("v=abc") == "abc" && query_v("x=1&v=d") == "d" && query_v("vv=1") == "", "query v");
     assert(cache_for("out/www/nabi.css", "/nabi.css", "v=1", false) == "public, max-age=3600", "stale version");
     assert(cache_for("out/www/og.png", "/og.png", "", false) == "public, max-age=3600", "bare og");

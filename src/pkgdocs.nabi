@@ -1,0 +1,284 @@
+// The packages' API docs (`/packages/<name>/<version>/`), as docs.rs does
+// for crates.io: the registry scans each published version's sources and
+// keeps its modules (web::apidoc::Module); this site fetches them
+// (sync) and renders them with the standard library's API pages (write),
+// in the docs' chrome. A package is versioned on its own, so its pages
+// sit beside the toolchain's version directories, and `latest/` is its
+// newest version.
+//
+//   <dir>/index.nabion             GET /api/v1/docs: List<DocsPackage>
+//   <dir>/<name>/<version>.nabion  GET /api/v1/packages/<n>/<v>/docs
+//   <dir>/<name>/<version>.state   the docs' state when it was fetched
+
+use pkg::apidoc;
+use pkg::layout;
+use pkg::layout::rel;
+use pkg::links;
+use pkg::{Frag, Site};
+use markdown::esc;
+use std::fs;
+use std::nabion;
+use std::process::{Command, Stdio};
+use web::apidoc::Module;
+use web::apidoc::nav;
+
+/// One version in the registry's docs index.
+#[derive(Nabion)]
+pub struct DocsVersion {
+    pub version: str;
+    pub yanked: bool;
+    pub repository: str;
+    pub rev: str;
+    /// `ok`, `nolib`, `failed`, or `""` when the registry has none yet.
+    pub docs: str;
+}
+
+#[derive(Nabion)]
+pub struct DocsPackage {
+    pub name: str;
+    pub description: str;
+    pub deps: List<str>;
+    pub official: bool;
+    pub versions: List<DocsVersion>;
+}
+
+#[derive(Nabion)]
+pub struct Status {
+    pub state: str;
+    pub message: str = "";
+    pub at: i64 = 0i64;
+    pub gen: i64 = 0i64;
+}
+
+/// A version's docs as the registry hands them out.
+#[derive(Nabion)]
+pub struct PackageDocs {
+    pub name: str;
+    pub version: str;
+    pub status: Status;
+    pub api: List<Module>;
+}
+
+fn get(url: str) throws -> str {
+    let out = try Command::new("curl").args(["-fsSL", "--max-time", "60", url]).stdin(Stdio::Null).output();
+    if !out.status.success() { throw ValueError::new(f"GET {url}: {(try? str::from_utf8(out.stderr)) ?? ""}"); }
+    try str::from_utf8(out.stdout)
+}
+
+fn put(path: str, text: str) throws {
+    let tmp = path + ".new";
+    try fs::write(tmp, text);
+    try fs::rename(tmp, path);
+}
+
+/// Fetch the registry's docs index into `dir`, and the docs of each
+/// version whose state there is new; true if anything changed.
+pub fn sync(dir: str, registry: str) throws -> bool {
+    try fs::create_dir_all(dir);
+    let text = try get(registry + "/api/v1/docs");
+    let pkgs: List<DocsPackage> = try nabion::from_str(text);
+    let changed = false;
+    let idx = dir + "/index.nabion";
+    if !fs::exists(idx) || (try fs::read_to_str(idx)) != text {
+        try put(idx, text);
+        changed = true;
+    }
+    for p in pkgs {
+        for v in p.versions {
+            if v.docs.is_empty() { continue; }
+            let base = f"{dir}/{p.name}/{v.version}";
+            let had = try fs::read_to_str(base + ".state") catch _ { "" };
+            if had.trim() == v.docs && fs::exists(base + ".nabion") { continue; }
+            let d = try get(f"{registry}/api/v1/packages/{p.name}/{v.version}/docs") catch e {
+                eprintln(f"pkgdocs: {e}");
+                continue;
+            };
+            try fs::create_dir_all(f"{dir}/{p.name}");
+            try put(base + ".nabion", d);
+            try put(base + ".state", v.docs + "\n");
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// `x.y.z` as a number to sort by; prereleases below their release.
+fn rank(v: str) -> i64 {
+    let (core, pre) = v.split_once("-") ?? (v, "");
+    let n = 0i64;
+    for p in core.split(".") { n = n * 100000i64 + (try p.parse::<i64>() catch _ { 0i64 }); }
+    n * 2i64 + (if pre.is_empty() { 1i64 } else { 0i64 })
+}
+
+/// The versions of `p` with docs, newest first.
+fn shown(p: DocsPackage) -> List<DocsVersion> {
+    let vs: List<DocsVersion> = List::new();
+    for v in p.versions {
+        if !v.docs.is_empty() { vs.push(v); }
+    }
+    vs.sort_by(|a: DocsVersion, b: DocsVersion| rank(b.version).cmp(rank(a.version)));
+    vs
+}
+
+/// The newest version not yanked whose docs were made; `none` without one.
+fn latest_of(vs: List<DocsVersion>) -> DocsVersion | none {
+    for v in vs {
+        if !v.yanked && v.docs == "ok" { return v; }
+    }
+    none
+}
+
+/// Where module `path` of a package is under `base` (`packages/json/0.2.0/`).
+fn out_of(base: str, path: str) -> str {
+    let k = path.find("::") ?? return base + "index.html";
+    base + path[k + 2:].replace("::", "/") + ".html"
+}
+
+/// A line of a version's source on its host, or `""` (src_link then
+/// links nothing): GitHub's blob pages at the commit.
+fn source_at(repo: str, rev: str) -> str {
+    let r = repo.trim_end_matches("/").trim_end_matches(".git");
+    if r.starts_with("https://github.com/") && !rev.is_empty() { f"{r}/blob/{rev}/" } else { "" }
+}
+
+/// The version menu of a page whose module is `rest` (`read.html`), in
+/// the package's directory `pdir` (`packages/json/`), seen from `from`.
+fn menu(pdir: str, rest: str, from: str, vs: List<DocsVersion>, cur: str, latest: str, pages: Dict<str, Set<str>>) -> str {
+    let b = StrBuf::new();
+    for v in vs {
+        let has = (pages.get(v.version) ?? Set::new()).contains(rest);
+        let to = pdir + v.version + "/" + (if has { rest } else { "index.html" });
+        let mark = if v.version == cur { " aria-current=\"true\"" } else { "" };
+        let note = if v.yanked { "yanked" } else if v.version == latest { "latest" } else if v.docs != "ok" { v.docs } else { "" };
+        let small = if note.is_empty() { "" } else { f"<small>{esc(note)}</small>" };
+        b.push_str(f"<li><a href=\"{rel(from, to)}\" data-label=\"v{esc(v.version)}\"{mark}>v{esc(v.version)}{small}</a></li>");
+    }
+    b.to_str()
+}
+
+/// Each page of package `p` at version `v` (`at`: its directory name,
+/// the version or `latest`), into `files`.
+fn version_pages(site: Site, p: DocsPackage, v: DocsVersion, d: PackageDocs, at: str, vs: List<DocsVersion>, latest: str, pages: Dict<str, Set<str>>, docs: Set<str>, chrome: str, files: Dict<str, str>) {
+    let pdir = f"packages/{p.name}/";
+    let base = pdir + at + "/";
+    if d.status.state != "ok" {
+        let why = if d.status.state == "nolib" { "it has no library (<code>src/lib.nabi</code>), so no API." } else { f"they could not be made: {esc(d.status.message)}. The version is published and installs as usual." };
+        let out = base + "index.html";
+        let body = f"<h1><code>{esc(p.name)}</code> {esc(v.version)}</h1><p>No docs for this version: {why}</p>";
+        let f = Frag { out: out, title: f"{p.name} {v.version}", side: "", body: body, pager: "", head: "", pkg_ver: v.version, pkg_vers: menu(pdir, "index.html", out, vs, v.version, latest, pages) };
+        files.insert(out, layout::package_page(site, f, chrome));
+        return;
+    }
+    let mods: List<Module> = List::new();
+    for m in d.api {
+        m.out = out_of(base, m.path);
+        mods.push(m);
+    }
+    let types = apidoc::type_index(mods);
+    let src = source_at(v.repository, v.rev);
+    let since: Dict<str, str> = Dict::new();
+    let spec: Dict<str, str> = Dict::new();
+    for m in mods {
+        let deps: List<nav::Package> = List::new();
+        for dn in p.deps {
+            let href = if docs.contains(dn) { rel(m.out, f"packages/{dn}/latest/index.html") } else { "" };
+            deps.push(nav::Package { name: dn, href: href });
+        }
+        let notes: Dict<str, str> = Dict::new();
+        let (html, heads) = apidoc::body(m, mods, since, notes, src, spec, types);
+        // Back to the package's page on the registry, and its source.
+        let tree = if src.is_empty() { "" } else { f" · <a href=\"{esc(src.replace("/blob/", "/tree/"))}\">Source <span aria-hidden=\"true\">↗</span></a>" };
+        let links = f"<p class=\"pkg-links\"><a href=\"{esc(site.packages)}/packages/{p.name}/{v.version}\">{esc(p.name)} {esc(v.version)} on the registry <span aria-hidden=\"true\">↗</span></a>{tree}</p>";
+        let html = if let k: usize = html.find("</h1>") { html[:k + 5] + links + html[k + 5:] } else { links + html };
+        let rest = m.out[base.len():];
+        let f = Frag { out: m.out, title: m.path, side: apidoc::package_sidebar(m, mods, m.out, v.version, deps), toc: apidoc::toc(heads), body: html, pager: "", head: "", trail: apidoc::crumb(m, mods), pkg_ver: v.version, pkg_vers: menu(pdir, rest, m.out, vs, v.version, latest, pages) };
+        files.insert(m.out, layout::package_page(site, f, chrome));
+    }
+}
+
+/// The module pages of each version: `rest` paths (`read.html`), for the
+/// version menu to stay on the page where the other version has it.
+fn module_pages(d: PackageDocs) -> Set<str> {
+    let s: Set<str> = Set::new();
+    s.insert("index.html");
+    for m in d.api { s.insert(out_of("", m.path)); }
+    s
+}
+
+/// `/packages/`: every package with docs, newest version first.
+fn index_page(site: Site, pkgs: List<(DocsPackage, str)>, chrome: str) -> str {
+    let b = StrBuf::new();
+    b.push_str("<h1>Package docs</h1>");
+    b.push_str(f"<p>The API of each package on <a href=\"{esc(site.packages)}\">packages.nabi-lang.org</a>, from its doc comments, per version. The registry makes them when a version is published; this list is the newest version of each.</p>");
+    b.push_str("<ul class=\"api-list\">");
+    for (p, v) in pkgs {
+        let tag = if p.official { " <small class=\"t-small\">official</small>" } else { "" };
+        b.push_str(f"<li><a href=\"{p.name}/latest\"><code>{esc(p.name)}</code></a> <small>{esc(v)}</small>{tag} <span>{esc(p.description)}</span></li>");
+    }
+    b.push_str("</ul>");
+    let f = Frag { out: "packages/index.html", title: "Package docs", side: "", body: b.to_str(), pager: "", head: "", pkg_ver: "-" };
+    layout::package_page(site, f, chrome)
+}
+
+/// Package docs written while the registry served them itself link to
+/// `<registry>/docs/<name>/<version>`, which no longer exists: here.
+fn moved(site: Site, html: str) -> str { html.replace(f"href=\"{site.packages}/docs/", "href=\"/packages/") }
+
+/// Every package's pages from `dir` (sync) into `docs_root/packages/`,
+/// with chrome linking into the docs version directory `chrome`; the
+/// number of pages.
+pub fn write(site: Site, docs_root: str, dir: str, chrome: str) throws -> usize {
+    let idx = dir + "/index.nabion";
+    if !fs::exists(idx) { return 0usize; }
+    let pkgs: List<DocsPackage> = try nabion::from_str(try fs::read_to_str(idx));
+    let docs: Set<str> = Set::new();
+    for p in pkgs {
+        if latest_of(shown(p)) is DocsVersion { docs.insert(p.name); }
+    }
+    let files: Dict<str, str> = Dict::new();
+    let listed: List<(DocsPackage, str)> = List::new();
+    for p in pkgs {
+        let vs = shown(p);
+        let newest = latest_of(vs) ?? { continue; };
+        let loaded: Dict<str, PackageDocs> = Dict::new();
+        let pages: Dict<str, Set<str>> = Dict::new();
+        for v in vs {
+            let text = try fs::read_to_str(f"{dir}/{p.name}/{v.version}.nabion") catch _ { continue; };
+            let d: PackageDocs = try nabion::from_str(text) catch e {
+                eprintln(f"pkgdocs: {p.name} {v.version}: {e}");
+                continue;
+            };
+            loaded.insert(v.version, d);
+            pages.insert(v.version, module_pages(d));
+        }
+        for v in vs {
+            let d = loaded.get(v.version) ?? { continue; };
+            version_pages(site, p, v, d, v.version, vs, newest.version, pages, docs, chrome, files);
+            if v.version == newest.version {
+                version_pages(site, p, v, d, "latest", vs, newest.version, pages, docs, chrome, files);
+            }
+        }
+        listed.push((p, newest.version));
+    }
+    if listed.is_empty() { return 0usize; }
+    listed.sort_by(|a: (DocsPackage, str), b: (DocsPackage, str)| a.0.name.cmp(b.0.name));
+    files.insert("packages/index.html", index_page(site, listed, chrome));
+    let out = docs_root + "/packages";
+    if fs::exists(out) { try fs::remove_dir_all(out); }
+    for k in files.keys() {
+        let path = docs_root + "/" + k;
+        try fs::create_dir_all(path[:path.rfind("/") ?? 0]);
+        // Served at canonical addresses (no `.html`): links from the root.
+        try fs::write(path, links::site_hrefs(site, moved(site, files[k]), "", k));
+    }
+    files.len()
+}
+
+#[test]
+fn paths_and_order() {
+    assert(out_of("packages/j/1.0.0/", "j") == "packages/j/1.0.0/index.html", "root");
+    assert(out_of("packages/j/1.0.0/", "j::read::event") == "packages/j/1.0.0/read/event.html", "nested");
+    assert(rank("0.10.0") > rank("0.9.9") && rank("1.0.0") > rank("1.0.0-rc.1"), "versions");
+    assert(source_at("https://github.com/o/j.git", "abc") == "https://github.com/o/j/blob/abc/", "github");
+    assert(source_at("https://example.org/j", "abc") == "", "other hosts link nothing");
+}

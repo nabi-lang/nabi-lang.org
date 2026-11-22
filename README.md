@@ -77,6 +77,10 @@ Deployment itself lives in a private repository.
 
 og:image and twitter:image are `og.png?v=<first 10 hex digits of its SHA-256>`, taken from `static/og.png` at build time, so a new image is a new URL that every platform fetches afresh. Stylesheets and scripts are linked the same way (`nabi.css?v=...`). `serve` is the only place that sets caching: a file asked for at its current `?v=` keeps a year (`immutable`); pages of a released version (`/0.1.2/...`) and the fonts a day; pages of `latest/`, `dev/` and nabi-lang.org, and the search indexes, five minutes; other files an hour. Every page carries an ETag and answers `If-None-Match` with 304. Every docs page has a card of its own, with its section, its title and its first sentence: `/<version>/og/<page>.png?v=<hash of what it shows>`. A build lists each version's cards in `og.nabion` beside its pages; `serve` draws a card with [Typst](https://typst.app) and `og/card.typ` the first time it is asked for (`NABI_WEB_TYPST`, with Geist and Pretendard in `NABI_WEB_OG_FONTS`), keeps it under its data directory, and falls back to `og.png` without one. When only a page's text changes, the cached card stays: re-scrape it with the [Facebook Sharing Debugger](https://developers.facebook.com/tools/debug/), the [LinkedIn Post Inspector](https://www.linkedin.com/post-inspector/) or Kakao's [sharing debugger](https://developers.kakao.com/tool/debugger/sharing) (clear the cache); X has no tool and refreshes in about 7 days.
 
+## Package docs
+
+The packages' API docs are on the docs site, as docs.rs does for crates.io: `/packages/<name>/<version>/<module>`, `latest/` for the newest version, and `/packages` lists them. The registry scans each published version and hands the modules out (`GET /api/v1/docs`, `GET /api/v1/packages/<name>/<version>/docs`); `serve` fetches what is new each round into `<data>/pkgdocs` (from `NABI_WEB_PACKAGES`, packages.nabi-lang.org by default) and the build renders them with the standard library's API pages, in the chrome of `latest/`. A version's pages keep a day, `latest/` five minutes. Locally, `nabi run -- pkgdocs-sync <dir> <registry>` fetches them and `pkg_docs` in `site.local.nabion` (or `NABI_PKG_DOCS`) points the build at `<dir>`.
+
 ## Configuration
 
 Edit `site.nabion` (NABION); `site.local.nabion` overrides its fields. Key fields: `title`, `tagline`, `description`, `base_url`, `docs_url`, `docs`, `www`, `spec` / `spec_ko`, `packages`, `library`, `out`. `versions.nabion` lists released docs versions, newest first, for local builds; the server works them out from the branches.
@@ -89,6 +93,7 @@ Edit `site.nabion` (NABION); `site.local.nabion` overrides its fields. Key field
 | `src/spec.nabi`   | Spec pages (English and Korean): sources, links, breadcrumbs, the other edition |
 | `src/guide.nabi`  | The docs' own pages (guide, examples, error codes) in both languages, and the docs home |
 | `src/apidoc.nabi` | API pages from the standard library sources |
+| `src/pkgdocs.nabi` | The packages' API pages (`/packages/<name>/<version>`) from what the registry made of each version |
 | `src/www.nabi`    | The nabi-lang.org pages (news/ listed newest first), the download page's archive sizes, robots.txt, security.txt, the sitemap, the installers |
 | `src/home.nabi`   | The nabi-lang.org landing page; its release notes come from nabi's CHANGELOG.md, archive sizes from the GitHub release |
 | `src/search.nabi` | The search index of each language |

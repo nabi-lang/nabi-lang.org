@@ -33,7 +33,56 @@ pub fn collect(lib: str) throws -> List<Module> { web::apidoc::pages(try web::ap
 
 fn md(text: str) -> str {
     if text.trim().is_empty() { return ""; }
-    layout::md(text, |h| h, false).html
+    let d = layout::md(shown(text), |h| h, false);
+    // The page's title is h1 (the module's path): a doc comment's own
+    // headings start at h2, whether it writes `#` or `##`.
+    let top = 7;
+    for h in d.headings { if h.level < top { top = h.level; } }
+    shift_heads(d.html, if top < 2 { 2 - top } else { 0 })
+}
+
+/// A doc comment as the reader sees it: a fence with no language, or
+/// `nabi` with doc test words (`nabi,norun`), is Nabi, and its lines that
+/// start with `# ` (or are a lone `#`) are setup for the doc test, hidden
+/// as `nabi doc` hides them.
+fn shown(text: str) -> str {
+    let out = StrBuf::new();
+    let fence = false;
+    let hide = false;
+    for line in text.lines() {
+        let l = line.trim_start();
+        if l.starts_with("```") {
+            if fence {
+                fence = false;
+                hide = false;
+            } else {
+                fence = true;
+                let info = l[3:].trim();
+                let lang = (info.split_once(",") ?? (info.split_once(" ") ?? (info, ""))).0;
+                if lang.is_empty() || lang == "nabi" {
+                    hide = true;
+                    out.push_str(line[:line.len() - l.len()] + "```nabi\n");
+                    continue;
+                }
+            }
+        } else if hide && (l == "#" || l.starts_with("# ")) {
+            continue;
+        }
+        out.push_str(line);
+        out.push_str("\n");
+    }
+    out.to_str()
+}
+
+/// `html` with each heading `by` levels lower, at most h6.
+fn shift_heads(html: str, by: i32) -> str {
+    if by == 0 { return html; }
+    let out = html;
+    for n in [5, 4, 3, 2, 1] {
+        let to = if n + by > 6 { 6 } else { n + by };
+        out = out.replace(f"<h{n}", f"<h{to}").replace(f"</h{n}>", f"</h{to}>");
+    }
+    out
 }
 
 fn summary(doc: str) -> str {
@@ -262,11 +311,14 @@ const KINDS: [(str, str); 8] = [
     ("type", "Type aliases"), ("fn", "Functions"), ("const", "Constants"), ("static", "Statics"),
 ];
 
-/// A link to line `line` of `file` (under library/) at `at` (`v0.1.4`,
-/// `main`); nothing without a line.
+/// A link to line `line` of `file` at `at`: a ref of the nabi repository
+/// (`v0.1.4`, `main`), `file` under library/; or a package's sources, the
+/// address `file` follows (`https://github.com/o/json/blob/<rev>/`).
+/// Nothing without a line.
 fn src_link(file: str, line: usize, at: str) -> str {
-    if line == 0 || file.is_empty() { return ""; }
-    f"<a class=\"src\" href=\"https://github.com/nabi-lang/nabi/blob/{at}/library/{esc(file)}#L{line}\">Source</a>"
+    if line == 0 || file.is_empty() || at.is_empty() { return ""; }
+    let href = if at.starts_with("https://") { at + file } else { f"https://github.com/nabi-lang/nabi/blob/{at}/library/{file}" };
+    f"<a class=\"src\" href=\"{esc(href)}#L{line}\">Source</a>"
 }
 
 /// Item `it` on page `from` (its module's, or its own when it moved out).
@@ -420,7 +472,10 @@ pub fn body(m: Module, mods: List<Module>, since: Dict<str, str>, notes: Dict<st
     let out = StrBuf::new();
     // The path in full, to copy; the breadcrumb above links up.
     out.push_str("<h1><code>" + esc(m.path).replace("::", "::<wbr>") + "</code></h1>");
-    out.push_str(md(intro(m, spec, m.out)));
+    // The module's own text, apart from the sections below (a package's
+    // can be a whole tutorial, with headings of its own).
+    let doc = md(intro(m, spec, m.out));
+    if !doc.is_empty() { out.push_str("<div class=\"api-intro\" lang=\"en\">" + doc + "</div>"); }
     if m.children.len() > 0 {
         out.push_str("<h2 id=\"modules\">Modules</h2><ul class=\"api-list\">");
         heads.push(Heading { level: 2, id: "modules", text: "Modules" });
@@ -528,6 +583,17 @@ pub fn sidebar(m: Module, mods: List<Module>, from: str, here: str, version: str
     let side = nav::side(nav::Package { name: root, version: version, href: rel(from, top.out), here: m.path == root }, tree, items, "Standard library", others);
     // The tier is the page's ancestor on an item's own page of its root.
     if here.is_empty() { side } else { side.replace("\" aria-current=\"page\"><span>", "\" aria-current=\"true\"><span>") }
+}
+
+/// Sidebar of a package's page `from` (pkgdocs): the package `name` at
+/// `version`, its modules as a tree, the module's items and, under
+/// "Dependencies", `deps` with their docs.
+pub fn package_sidebar(m: Module, mods: List<Module>, from: str, version: str, deps: List<nav::Package>) -> str {
+    let root = segs(m.path)[0];
+    let tree = nav::tree(mods, m, root, |q: Module| rel(from, q.out));
+    let items = nav::items(m, root, |_it: Item, id: str| if from == m.out { "#" + id } else { rel(from, m.out) + "#" + id }, "");
+    let top = find(mods, root) ?? m;
+    nav::side(nav::Package { name: root, version: version, href: rel(from, top.out), here: m.path == root }, tree, items, "Dependencies", deps)
 }
 
 /// The breadcrumb of module `m`'s page.
@@ -638,6 +704,13 @@ pub fn frags(site: Site, spec: List<Page>, out: Dict<str, Frag>) throws -> (List
         out.insert(o, f);
     }
     (mods, api, api_ko)
+}
+
+#[test]
+fn doc_comments_as_shown() {
+    assert(shown("a\n```\n# let x = 1;\nf(x);\n```\n") == "a\n```nabi\nf(x);\n```\n", shown("a\n```\n# let x = 1;\nf(x);\n```\n"));
+    assert(shown("```nabi,norun\n#\ng();\n```\n```text\n# kept\n```\n") == "```nabi\ng();\n```\n```text\n# kept\n```\n", "words and other languages");
+    assert(md("# Tutorial\n\n## Step\n").contains("<h2") && md("## T\n\n### S\n").contains("<h3"), "headings start at h2");
 }
 
 #[test]

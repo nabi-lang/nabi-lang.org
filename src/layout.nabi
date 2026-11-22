@@ -744,6 +744,11 @@ pub fn ver_banner(site: Site, root: str, out: str, in_latest: bool) -> str {
 /// version directories.
 pub fn page(site: Site, f: Frag, banner: str) -> str { frame(site, root_of(f.out), f, banner) }
 
+/// A package's docs page (pkgdocs): `f.out` is under the docs root
+/// (`packages/json/0.2.0/read.html`), and the chrome links into the
+/// toolchain docs of version directory `dir` (`latest`).
+pub fn package_page(site: Site, f: Frag, dir: str) -> str { frame(site, root_of(f.out) + dir + "/", f, "") }
+
 /// The 404 page of the version directory `dir` (its Korean one if `ko`),
 /// served for any missing path under it, so its links are absolute and
 /// stay in that version.
@@ -798,6 +803,9 @@ fn ver_suffix(site: Site) -> str {
 
 fn frame(site: Site, root: str, f: Frag, banner: str) -> str {
     let out = f.out;
+    // A package's docs (pkgdocs): versioned by the package, outside the
+    // toolchain's version directories, in English only.
+    let pkg = !f.pkg_ver.is_empty();
     let ko = out.starts_with("ko/");
     let at = if ko { out["ko/".len():] } else { out };
     let lost = at == "404.html";
@@ -808,7 +816,7 @@ fn frame(site: Site, root: str, f: Frag, banner: str) -> str {
         nav.push_str(nav_item(root + in_lang(href, ko), tr(ko, en, kr), sec == key));
     }
     let name = tr(ko, "Nabi Docs", "Nabi 문서");
-    let full = (if at == "index.html" { name } else { f.title + " - " + name }) + ver_suffix(site);
+    let full = (if at == "index.html" { name } else { f.title + " - " + name }) + (if pkg { "" } else { ver_suffix(site) });
     let contents = tr(ko, "Contents", "목차");
     let on_this = tr(ko, "On this page", "이 페이지의 내용");
     // On narrow screens the sidebar is a drawer, opened from a bar in
@@ -847,16 +855,16 @@ fn frame(site: Site, root: str, f: Frag, banner: str) -> str {
         };
         f"<nav class=\"crumb\" aria-label=\"{tr(ko, "Breadcrumb", "이동 경로")}\"><a href=\"{root}{in_lang(sec_index, ko)}\">{tr(ko, sec_en, sec_ko)}</a>{chap}</nav>"
     };
-    let switch = if lost { "" } else { lang_switch(root, at, ko, f.alt, f.sec) };
+    let switch = if lost || pkg { "" } else { lang_switch(root, at, ko, f.alt, f.sec) };
     let pagehead = if crumb.is_empty() && switch.is_empty() { "" } else { f"<div class=\"pagehead\">{crumb}{switch}</div>\n" };
     let lang = if ko { "ko" } else { "en" };
     let desc = esc(describe(site, out, body));
     // A 404 page has no address of its own; the Korean API pages are the
     // English ones in Korean chrome, so they name those.
-    let url = if lost { "" } else if ko && at.starts_with("std/") { latest(site, at) } else { latest(site, if at == "index.html" && !ko { "" } else { out }) };
+    let url = if pkg { site.docs_url + url::canon("/" + out) } else if lost { "" } else if ko && at.starts_with("std/") { latest(site, at) } else { latest(site, if at == "index.html" && !ko { "" } else { out }) };
     // Unreleased docs, and Korean pages still in English, stay out of
     // search engines.
-    let robots = if site.version == "dev" || f.noindex { "<meta name=\"robots\" content=\"noindex\">\n" } else { "" };
+    let robots = if (site.version == "dev" && !pkg) || f.noindex { "<meta name=\"robots\" content=\"noindex\">\n" } else { "" };
     let ver = if site.version == "dev" { "dev" } else { "v" + site.version };
     let links = Links { home: site.base_url, docs: root + in_lang("index.html", ko), learn: root + in_lang("learn/index.html", ko), examples: root + in_lang("examples/index.html", ko), errors: if site.no_errors { "" } else { root + in_lang("errors/index.html", ko) }, spec: root + in_lang("spec/refs-lang/index.html", ko), api: root + in_lang("std/index.html", ko), tools: root + in_lang("spec/refs-lang/009-tools/index.html", ko), publishing: root + in_lang("learn/18-features-and-publishing.html", ko) + (if ko { "" } else { "#publishing-a-package" }), roadmap: site.base_url + "/roadmap", news: site.base_url + "/news", faq: site.base_url + "/faq" };
     let play = if !site.newest.is_empty() && site.version == site.newest { esc(site.playground) } else { "" };
@@ -866,13 +874,13 @@ fn frame(site: Site, root: str, f: Frag, banner: str) -> str {
         ("Skip to content", "Menu", "Sections", "Search docs", "Search results", "Docs version")
     };
     let note = if at.starts_with("spec/") { tr(ko, "<span>Spec text © 2026 DaminStudio and the Nabi contributors, <a href=\"https://creativecommons.org/licenses/by/4.0/\">CC BY 4.0</a></span>", "<span>사양 본문 © 2026 DaminStudio and the Nabi contributors, <a href=\"https://creativecommons.org/licenses/by/4.0/\">CC BY 4.0</a></span>") } else { "" };
-    let img = og_image(site, f);
+    let img = if pkg { site.base_url + "/og.png" + (if site.og.is_empty() { "" } else { "?v=" + site.og }) } else { og_image(site, f) };
     let alt = if img.contains("/og/") { if f.title == name { name } else { f.title + " - " + name } } else { pkg::headline(site) };
     f"<!doctype html>
 <html class=\"nb lt\" lang=\"{lang}\">
 <head>
 {head(site, root, full, desc, url, img, alt, robots + f.head, ko)}</head>
-<body class=\"{kind}\" data-root=\"{root}\" data-version=\"{esc(site.version)}\" data-play=\"{play}\">
+<body class=\"{kind}\" data-root=\"{root}\" data-version=\"{if pkg { "" } else { esc(site.version) }}\" data-play=\"{play}\">
 <a class=\"skip\" href=\"#content\">{skip}</a>
 <header class=\"hdr top\" lang=\"{lang}\">
 <div class=\"in\">
@@ -881,7 +889,7 @@ fn frame(site: Site, root: str, f: Frag, banner: str) -> str {
 <nav id=\"nav\" class=\"nav main-nav\" aria-label=\"{sections}\">{nav.to_str()}</nav>
 <div class=\"tools\">
 <div class=\"search\" role=\"search\"><button type=\"button\" class=\"s-open\" aria-label=\"{find}\" tabindex=\"-1\" aria-hidden=\"true\">{ICON_SEARCH}</button><input id=\"q\" type=\"search\" placeholder=\"{find}\" aria-label=\"{find}\" aria-keyshortcuts=\"/ Control+K Meta+K\" autocomplete=\"off\" role=\"combobox\" aria-autocomplete=\"list\" aria-expanded=\"false\" aria-controls=\"results\"><kbd class=\"kbd\" aria-hidden=\"true\">/</kbd><ul id=\"results\" class=\"results appear\" role=\"listbox\" aria-label=\"{results}\" hidden></ul><p class=\"sr-only\" role=\"status\"></p></div>
-<details class=\"vers\"><summary aria-label=\"{version}: {ver}\">{ver}</summary><ul class=\"vers-menu\">{vers_items(site, root, out, lost)}</ul></details>
+{if pkg && f.pkg_vers.is_empty() { "" } else if pkg { f"<details class=\"vers\"><summary aria-label=\"Package version: v{esc(f.pkg_ver)}\">v{esc(f.pkg_ver)}</summary><ul class=\"vers-menu\">{f.pkg_vers}</ul></details>" } else { f"<details class=\"vers\"><summary aria-label=\"{version}: {ver}\">{ver}</summary><ul class=\"vers-menu\">{vers_items(site, root, out, lost)}</ul></details>" }}
 {chrome::theme_button(ko)}
 </div>
 </div>
