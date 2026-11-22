@@ -149,7 +149,7 @@ fn play_link(site: Site, src: str, l: Lang) -> str { site.playground + "/" + l.s
 /// readers) says what it shows; aria-label on a <pre> is not read.
 fn program(site: Site, s: Sample, docs: fn(str) -> str, label: str, l: Lang) -> str {
     let hl = error_line(s.out);
-    let play = f"<a class=\"btn-2 btn-sm play\" href=\"{esc(play_link(site, s.src, l))}\" aria-label=\"{tr(l, "Run src/main.nabi in the playground", "플레이그라운드에서 src/main.nabi 실행", "在演练场中运行 src/main.nabi", "在演練場中執行 src/main.nabi")}\">{tr(l, "Run", "실행", "运行", "執行")} ↗</a>";
+    let play = f"<a class=\"btn-2 btn-sm play\" href=\"{esc(play_link(site, s.src, l))}\" aria-label=\"{tr(l, "Run src/main.nabi in the playground", "플레이그라운드에서 src/main.nabi 실행", "在 Playground 中运行 src/main.nabi", "在 Playground 中執行 src/main.nabi")}\">{tr(l, "Run", "실행", "运行", "執行")} ↗</a>";
     f"<div class=\"cb prog\"><div class=\"cb-h\"><span class=\"t-label\">src/main.nabi</span>{play}</div><pre class=\"pre\"><code>{numbered(s.src, hl)}</code></pre></div>
 <figure class=\"term-fig\"><div class=\"term-bar\" aria-hidden=\"true\">~/{s.name}</div><pre class=\"term\">{transcript(s.out, docs)}</pre><figcaption class=\"sr-only\">{label}</figcaption></figure>"
 }
