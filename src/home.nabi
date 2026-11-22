@@ -53,7 +53,7 @@ fn news(path: str, release: str) -> News | none {
 
 /// `#123` in a changelog entry as a link to that issue or pull request
 /// (GitHub sends either address to the right one).
-fn refs(html: str) -> str {
+pub fn refs(html: str) -> str {
     let out = StrBuf::new();
     let rest = html;
     loop {

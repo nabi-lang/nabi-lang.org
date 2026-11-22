@@ -394,7 +394,16 @@ pub struct Resp {
 
 fn text(status: i32, body: str) -> Resp { Resp { status: status, headers: ["Content-Type: text/plain; charset=utf-8", "Cache-Control: no-store"], body: body + "\n", file: "" } }
 
-fn page(f: str, path: str, query: str, docs: bool) -> Resp { Resp { status: 200, headers: [f"Content-Type: {http::content_type(f)}", "Cache-Control: " + cache_for(f, path, query, docs)], body: "", file: f } }
+fn page(f: str, path: str, query: str, docs: bool) -> Resp {
+    let h: List<str> = [f"Content-Type: {http::content_type(f)}", "Cache-Control: " + cache_for(f, path, query, docs)].to_list();
+    // The search palette on nabi-lang.org reads the docs' search files.
+    if docs && f.ends_with(".json") { h.push("Access-Control-Allow-Origin: *"); }
+    Resp { status: 200, headers: h, body: "", file: f }
+}
+
+/// A 301 to a page's canonical address: it does not change, so browsers
+/// and the CDN keep it a day.
+const MOVED: str = "Cache-Control: public, max-age=86400";
 
 const FOREVER: str = "public, max-age=31536000, immutable";
 
@@ -484,7 +493,7 @@ fn route(cfg: Cfg, r: Request) -> Resp {
     let docs = host == cfg.docs_host || host.starts_with("docs.");
     let root = cfg.data + "/out/" + if docs { "docs" } else { "www" };
     if let to: str = redirect(r.path, docs) {
-        return Resp { status: 301, headers: [url::moved(to, r.query), "Cache-Control: public, max-age=3600"], body: "", file: "" };
+        return Resp { status: 301, headers: [url::moved(to, r.query), MOVED], body: "", file: "" };
     }
     let p = r.path;
     // /0.1/... is the newest built 0.1.x.
@@ -580,10 +589,11 @@ fn draw(cfg: Cfg, c: pkg::layout::Card, png: str) throws {
 
 // Pages run only their own files, plus the analytics beacon Cloudflare
 // injects; style attributes carry the API pages' tints. The 404 page's
-// search on nabi-lang.org submits to docs.
+// search on nabi-lang.org submits to docs; the search palette and the
+// docs search's Packages group read the docs and the registry.
 // No 'unsafe-inline' anywhere: no style="" in a page either (the kit's
 // chrome::align_classes, apidoc's indent classes).
-const CSP: str = "Content-Security-Policy: default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self' https://cloudflareinsights.com; object-src 'none'; base-uri 'none'; form-action 'self' https://docs.nabi-lang.org; frame-ancestors 'none'" + http::REPORT_TO;
+const CSP: str = "Content-Security-Policy: default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self' https://docs.nabi-lang.org https://packages.nabi-lang.org https://cloudflareinsights.com; object-src 'none'; base-uri 'none'; form-action 'self' https://docs.nabi-lang.org; frame-ancestors 'none'" + http::REPORT_TO;
 
 fn handle(s: TcpStream, cfg: Cfg) {
     let t0 = Instant::now();
@@ -697,6 +707,9 @@ fn redirects() {
     assert(to("/packages/search-index.json", true) == "-", "the list's search index");
     assert(to("/packages", true) == "-" && to("/packages/json/0.2.0", true) == "-" && to("/packages/json", false) == "-", "package docs pages");
     assert(to("/ko/packages/json", true) == "/ko/packages/json/latest" && to("/ko/packages", true) == "-", "in the Korean chrome");
+    assert(MOVED.contains("max-age=86400") && CSP.contains("connect-src 'self' https://docs.nabi-lang.org https://packages.nabi-lang.org"), "301s keep a day; the palette reaches the other hosts");
+    let idx = page("out/docs/latest/search-index.json", "/latest/search-index.json", "", true);
+    assert(idx.headers.contains("Access-Control-Allow-Origin: *") && !page("out/www/x.json", "/x.json", "", false).headers.contains("Access-Control-Allow-Origin: *"), "cors on the docs' json");
     assert(query_v("v=abc") == "abc" && query_v("x=1&v=d") == "d" && query_v("vv=1") == "", "query v");
     assert(cache_for("out/www/nabi.css", "/nabi.css", "v=1", false) == FRESH, "stale version");
     assert(cache_for("out/www/og.png", "/og.png", "", false) == FRESH, "bare og");

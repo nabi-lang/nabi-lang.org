@@ -19,7 +19,7 @@ button { font: inherit; }
 .brand img { display: block; }
 .nav a[aria-current] { color: var(--ink); background: var(--bg-2); font-weight: 500; }
 .hdr .tools { margin-left: auto; display: flex; gap: 8px; align-items: center; }
-.hdr .gh { color: var(--ink-2); padding: 0 6px; }
+.hdr .gh { display: inline-flex; align-items: center; min-height: 24px; color: var(--ink-2); padding: 0 6px; }
 .hdr .btn-sm { padding: 7px 12px; }
 .hdr .btn[aria-current] { box-shadow: 0 0 0 2px var(--bg), 0 0 0 3px var(--line-2); }
 
@@ -46,6 +46,9 @@ button { font: inherit; }
 .results .legend .kbd + .kbd { margin-left: 2px; }
 .results mark { background: none; color: var(--acc); font-weight: 600; }
 .results .empty { padding: 8px 10px; color: var(--ink-3); }
+.results .grp-pkgs { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--line); }
+.results .grp-pkgs ul { margin: 0; padding: 0; list-style: none; }
+.results .grp-h { padding: 6px 10px 2px; color: var(--ink-3); }
 
 .vers { position: relative; }
 .vers summary { display: flex; align-items: center; gap: 6px; height: 34px; padding: 0 10px; border: 1px solid var(--line-2); border-radius: var(--r); background: var(--panel); color: var(--ink); font-family: var(--mono); font-size: 12px; list-style: none; cursor: pointer; white-space: nowrap; }
@@ -575,7 +578,7 @@ a.t:hover { text-decoration: underline; text-underline-offset: 3px; }
 /* a package's docs header (docs.rs style): the package, its version menu
    and its links in place of the language docs' sections */
 .pkg-hdr .pkg-title { display: flex; align-items: center; gap: 8px; min-width: 0; margin-left: 4px; }
-.pkg-hdr .pkg-name { font-family: var(--mono); font-weight: 600; font-size: 15px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-decoration: none; }
+.pkg-hdr .pkg-name { line-height: 24px; font-family: var(--mono); font-weight: 600; font-size: 15px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-decoration: none; }
 .pkg-hdr .pkg-v { font-family: var(--mono); font-size: 12px; color: var(--ink-3); }
 .pkg-hdr .main-nav .out { color: var(--ink-3); font-size: 12px; }
 .pkg-hdr .pkg-title .vers { flex: none; }

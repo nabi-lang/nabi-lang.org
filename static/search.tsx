@@ -1,9 +1,15 @@
 // Client-side search over search-index.json: {p: [[title, url]], h:
-// [[page, heading, id, named?]]}, read into [{t: title, u: url, p: page}],
-// and over the words of the pages' text in search-text.json, which points
-// at the same entries by number.
+// [[page, heading, id, named?, kind?]]}, read into [{t: title, u: url, p:
+// page}], and over the words of the pages' text in search-text/<shard>.json
+// (search.nabi's shard_of: a word's first letter), which point at the same
+// entries by number; a query reads only its words' shards. The excerpts
+// shown under the hits are search-x/<k>.json, 256 entries a file, read for
+// the hits shown. A package's own index carries its excerpts inline.
 // Page urls are canonical addresses within the version (`learn`,
 // `learn/05-sum-types`); data-root is the version's root (`/latest/`).
+// Under the hits, a Packages group: the registry's packages
+// (data-registry, GET /api/v1/docs?format=json) and every package's API
+// (/packages/search-api.json), read with the first query of three letters.
 // The UI it adds is Preact components (ui/); the rest wires the
 // server-rendered markup.
 import { render } from "preact";
@@ -22,10 +28,12 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
     /** [page, heading, id, named?, kind?, excerpt?] */
     h: [n: number, t: string, id: string, named?: unknown, kind?: string, x?: string][];
   }
-  /** search-text.json: entry count, [word, entry numbers as base-36 gaps]. */
+  /** search-text/<shard>.json: entry count, [word, entry numbers as base-36 gaps]. */
   interface TextIndex { n: number; w: [w: string, ids: string][] }
-  /** A hit: title, url, page title (headings only), API kind, excerpt. */
-  interface Entry { t: string; u: string; p: string; k: string; x: string }
+  /** A hit: title, url, page title (headings only), API kind, excerpt, its number. */
+  interface Entry { t: string; u: string; p: string; k: string; x: string; n: number }
+  /** A package as the registry lists it. */
+  interface Listed { name: string; description?: string }
   /** versions.json, the part read here. */
   interface Versions { latest: string; patches?: Record<string, string> }
   /** rank, kind order, main type first, title length, entry */
@@ -36,8 +44,8 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
     copiedLink: string; linkInBar: string; press: (k: string) => string;
     version: string; found: (n: number, all: number) => string;
     legend: Row[]; missing: (v: string) => string;
-    help: string; rows: { search: string; pager: string; filter: string; help: string; esc: string };
-    filter: string; shown: (n: number) => string; here: string;
+    help: string; rows: { search: string; all: string; pager: string; filter: string; help: string; esc: string };
+    filter: string; shown: (n: number) => string; here: string; packages: string;
   }
   // Elements that carry their running animation.
   interface Sliding extends HTMLElement { slid?: Animation | null }
@@ -61,39 +69,70 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
   const ko = document.documentElement.lang === "ko";
   // The index, fetched once. Declared before anything that may need it
   // at once (the 404 hint below).
+  let loading: Promise<Entry[]> | null = null;
   const load = (): Promise<Entry[]> =>
     index ? Promise.resolve(index)
-      : fetch(sroot + (ko && !scoped ? "ko/" : "") + "search-index.json").then((r) => {
+      : loading ??= fetch(sroot + (ko && !scoped ? "ko/" : "") + "search-index.json").then((r) => {
         if (!r.ok) throw new Error(`search-index.json: ${r.status}`);
         return r.json() as Promise<SearchIndex>;
       }).then((d) => {
-        const idx: Entry[] = d.p.map(([t, u, x]) => ({ t, u, p: "", k: "", x: x || "" }));
+        const idx: Entry[] = d.p.map(([t, u, x], n) => ({ t, u, p: "", k: "", x: x || "", n }));
         index = idx;
         for (const [n, t, id, named, kind, x] of d.h) {
           const [pt, pu] = d.p[n]!;
-          idx.push({ t: named ? `${pt} › ${t}` : t, u: `${pu}#${id}`, p: pt, k: kind || "", x: x || "" });
+          idx.push({ t: named ? `${pt} › ${t}` : t, u: `${pu}#${id}`, p: pt, k: kind || "", x: x || "", n: idx.length });
         }
         return idx;
-      });
+      }).catch((e: unknown) => { loading = null; throw e; });
+  const dir = (ko && !scoped ? "ko/" : "");
+  const getJson = <J,>(url: string): Promise<J> => fetch(url).then((r) => {
+    if (!r.ok) throw new Error(`${url}: ${r.status}`);
+    return r.json() as Promise<J>;
+  });
 
-  // The body text's words, sorted, and each one's entries; fetched on the
-  // first query long enough to look into the text.
-  let words: string[] | null = null;
-  let posts: string[] = [];
-  const loadText = (): Promise<void> =>
-    words || scoped ? Promise.resolve()
-      : fetch(root + (ko ? "ko/" : "") + "search-text.json").then((r) => {
-        if (!r.ok) throw new Error(`search-text.json: ${r.status}`);
-        return r.json() as Promise<TextIndex>;
-      }).then((d) => {
-        words = d.w.map(([w]) => w);
-        posts = d.w.map(([, ids]) => ids);
-      });
+  // The excerpts, a file per CHUNK entries, read for the hits shown.
+  const CHUNK = 256;
+  const chunks = new Map<number, Promise<void>>();
+  const excerpts = (shown: Entry[]): Promise<void> => {
+    const want = new Set<number>();
+    for (const e of shown) if (!e.x) want.add(Math.floor(e.n / CHUNK));
+    return Promise.all([...want].map((c) => {
+      let got = chunks.get(c);
+      if (!got) {
+        got = getJson<string[]>(`${sroot}${dir}search-x/${c}.json`).then((xs) => {
+          xs.forEach((x, k) => { const e = index![c * CHUNK + k]; if (e && x) e.x = x; });
+        });
+        chunks.set(c, got);
+      }
+      return got.catch(() => {});
+    })).then(() => {});
+  };
+
+  // The body text's words, by shard (search.nabi's shard_of), each list
+  // sorted, and each word's entries; read for a query's words.
+  interface Shard { words: string[]; posts: string[] }
+  const shards = new Map<string, Promise<Shard>>();
+  const shardOf = (w: string): string => {
+    const c = w[0] || "";
+    if (c >= "a" && c <= "z") return c;
+    if ((c >= "0" && c <= "9") || c === "_") return "0";
+    const h = c.charCodeAt(0);
+    if (h >= 0xac00 && h <= 0xd7a3) return "k" + Math.floor((h - 0xac00) / 588);
+    return "other";
+  };
+  const loadShard = (key: string): Promise<Shard> => {
+    let got = shards.get(key);
+    if (!got) {
+      got = getJson<TextIndex>(`${root}${ko ? "ko/" : ""}search-text/${key}.json`).then((d) => ({ words: d.w.map(([w]) => w), posts: d.w.map(([, ids]) => ids) }));
+      shards.set(key, got);
+    }
+    return got;
+  };
   // The words search.nabi leaves out of the text index (stop_words).
   const STOP = new Set(["the", "and", "for", "are", "but", "not", "you", "your", "with", "this", "that", "from", "into", "its", "has", "have", "was", "were", "can", "will", "than", "then", "them", "they", "their", "there", "these", "those", "which", "what", "when", "also", "only", "each", "any", "all", "one", "two", "more", "same", "other", "does", "doesn", "isn", "here", "such", "some", "most", "out", "how", "who", "why", "amp", "quot", "nbsp", "이", "그", "수", "것", "등", "및", "더"]);
-  const ids = (k: number): number[] => {
+  const ids = (sh: Shard, k: number): number[] => {
     let at = 0;
-    return posts[k]!.split(",").map((g) => (at += parseInt(g, 36)));
+    return sh.posts[k]!.split(",").map((g) => (at += parseInt(g, 36)));
   };
   // The first word not below `w`.
   const lower = (ws: string[], w: string): number => {
@@ -111,30 +150,54 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
   };
   // Entries whose text has a word starting with one of `alts`; a term
   // of five letters or more with no such word takes the words one edit
-  // away. Null when the term matches nothing.
-  const textHits = (alts: string[]): Set<number> | null => {
-    const ws = words!;
+  // away that share its first letter (its shard). Null when the term
+  // matches nothing.
+  const textHits = (alts: string[], loaded: Map<string, Shard>): Set<number> | null => {
     const got = new Set<number>();
     let seen = 0;
     for (const w of alts) {
-      for (let k = lower(ws, w); k < ws.length && ws[k]!.startsWith(w) && seen < 200; k++, seen++) for (const id of ids(k)) got.add(id);
+      const sh = loaded.get(shardOf(w));
+      if (!sh) continue;
+      const ws = sh.words;
+      for (let k = lower(ws, w); k < ws.length && ws[k]!.startsWith(w) && seen < 200; k++, seen++) for (const id of ids(sh, k)) got.add(id);
     }
-    if (!got.size && alts[0]!.length >= 5) {
-      const w = alts[0]!;
-      ws.forEach((x, k) => { if (near1(w, x)) for (const id of ids(k)) got.add(id); });
+    const w = alts[0]!;
+    const sh = loaded.get(shardOf(w));
+    if (!got.size && w.length >= 5 && sh) {
+      sh.words.forEach((x, k) => { if (near1(w, x)) for (const id of ids(sh, k)) got.add(id); });
     }
     return got.size ? got : null;
   };
 
+  // The Packages group: the registry's list, then every package's API,
+  // fetched once; either alone will do, and none leaves the group out.
+  const registry = (document.body.dataset.registry || "").replace(/\/$/, "");
+  const pkgRoot = ko ? "/ko/packages/" : "/packages/";
+  let pkgs: Promise<Entry[]> | null = null;
+  const loadPkgs = (): Promise<Entry[]> => (pkgs ??= Promise.all([
+    registry ? getJson<Listed[]>(registry + "/api/v1/docs?format=json").catch(() => [] as Listed[]) : Promise.resolve([] as Listed[]),
+    getJson<SearchIndex>("/packages/search-api.json").catch(() => ({ p: [], h: [] }) as SearchIndex),
+  ]).then(([list, api]) => {
+    const docs = new Set(api.p.filter(([, u]) => /^[^/]+\/latest$/.test(u)).map(([, u]) => u.split("/")[0]!));
+    const out: Entry[] = list.map((r) => ({ t: r.name, u: docs.has(r.name) ? `${pkgRoot}${r.name}/latest` : `${registry}/packages/${r.name}`, p: "", k: "package", x: r.description || "", n: -1 }));
+    const listed = new Set(list.map((r) => r.name));
+    for (const [t, u] of api.p) if (!listed.has(t)) out.push({ t, u: pkgRoot + u, p: "", k: t.includes("::") ? "mod" : "package", x: "", n: -1 });
+    for (const [n, t, id, , kind] of api.h) {
+      const pg = api.p[n];
+      if (pg) out.push({ t: pg[0].split("::")[0] + "::" + t, u: `${pkgRoot}${pg[1]}#${id}`, p: pg[0], k: kind || "", x: "", n: -1 });
+    }
+    return out;
+  }));
+
   const T: Strings = ko
     ? { run: "실행", runLabel: "플레이그라운드에서 실행", copy: "복사", copyLabel: "코드 복사", copied: "복사됨", collapse: "접기", none: "결과 없음", inLatest: "최신 문서에서 찾기 →", down: "검색할 수 없습니다. 잠시 후 다시 시도하세요.", copiedLink: "링크 복사됨", linkInBar: "주소창에 링크가 있습니다", press: (k) => `${k}를 누르세요`, version: "문서 버전", found: (n, all) => (all > n ? `결과 ${all}개 중 ${n}개 표시` : `결과 ${n}개`),
         legend: [["↑ ↓", "이동"], ["↵", "열기"], ["esc", "닫기"]], missing: (v) => `${v}에는 그 페이지가 없어서 가장 가까운 페이지를 열었습니다.`,
-        help: "키보드 단축키", rows: { search: "문서 검색", pager: "이전 / 다음 페이지", filter: "메서드 거르기", help: "이 도움말", esc: "닫기 / 검색 지우기" },
-        filter: "메서드 거르기", shown: (n) => `메서드 ${n}개`, here: "(지금 쓰는 시스템)" }
+        help: "키보드 단축키", rows: { search: "문서 검색", all: "문서, 표준 라이브러리, 패키지 검색", pager: "이전 / 다음 페이지", filter: "메서드 거르기", help: "이 도움말", esc: "닫기 / 검색 지우기" },
+        filter: "메서드 거르기", shown: (n) => `메서드 ${n}개`, here: "(지금 쓰는 시스템)", packages: "패키지" }
     : { run: "Run", runLabel: "Run in the playground", copy: "Copy", copyLabel: "Copy code", copied: "Copied", collapse: "Collapse", none: "No results", inLatest: "Search the latest docs →", down: "Search is unavailable right now.", copiedLink: "Link copied", linkInBar: "link in the address bar", press: (k) => `Press ${k}`, version: "Docs version", found: (n, all) => (all > n ? `${n} of ${all} results shown` : n === 1 ? "1 result" : `${n} results`),
         legend: [["↑ ↓", "to move"], ["↵", "to open"], ["esc", "to close"]], missing: (v) => `That page is not in ${v}, so this is the closest one.`,
-        help: "Keyboard shortcuts", rows: { search: "Search the docs", pager: "Previous / next page", filter: "Filter methods", help: "This help", esc: "Close / clear search" },
-        filter: "Filter methods", shown: (n) => (n === 1 ? "1 method" : `${n} methods`), here: "(your system)" };
+        help: "Keyboard shortcuts", rows: { search: "Search the docs", all: "Search docs, std and packages", pager: "Previous / next page", filter: "Filter methods", help: "This help", esc: "Close / clear search" },
+        filter: "Filter methods", shown: (n) => (n === 1 ? "1 method" : `${n} methods`), here: "(your system)", packages: "Packages" };
 
   // Motion (nabi.css tokens): only after a click or a key, never on load,
   // and none with reduced motion.
@@ -490,20 +553,14 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
     return lang.replace(/\/$/, "");
   };
   const KIND: Record<string, string> = ko
-    ? { method: "메서드", fn: "함수", struct: "struct", enum: "enum", trait: "트레잇", type: "타입 별칭", const: "상수", static: "정적", impl: "impl" }
-    : { method: "method", fn: "fn", struct: "struct", enum: "enum", trait: "trait", type: "type", const: "const", static: "static", impl: "impl" };
+    ? { method: "메서드", fn: "함수", struct: "struct", enum: "enum", trait: "트레잇", type: "타입 별칭", const: "상수", static: "정적", impl: "impl", package: "패키지", mod: "모듈" }
+    : { method: "method", fn: "fn", struct: "struct", enum: "enum", trait: "trait", type: "type", const: "const", static: "static", impl: "impl", package: "package", mod: "module" };
 
   // Docs: the version menu and, off the newest release, a banner.
   const vers = document.querySelector<HTMLDetailsElement>(".vers");
   const version = document.body.dataset.version;
-  if (vers) {
-    // Escape or a click elsewhere closes the menu.
-    const sum = vers.querySelector("summary")!;
-    document.addEventListener("keydown", (ev) => {
-      if (ev.key === "Escape" && vers.open) { vers.open = false; sum.focus({ preventScroll: true }); }
-    });
-    document.addEventListener("click", (ev) => { if (!vers.contains(ev.target as Node | null)) vers.open = false; });
-  }
+  // Escape or a click elsewhere closes the menu: theme.js, as for every
+  // header menu.
   if (vers && version) {
     // The menu comes with the page (layout.nabi): each version's link is
     // this page in it. A page that version lacks: its section's start,
@@ -654,12 +711,18 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
 
   // The list as last searched; drawn again as the selection moves.
   let list: Omit<ResultsProps, "sel"> | null = null;
-  const text = { none: T.none, down: T.down, inLatest: scoped ? document.body.dataset.allLabel || T.inLatest : T.inLatest, legend: T.legend };
+  const text = { none: T.none, down: T.down, inLatest: scoped ? document.body.dataset.allLabel || T.inLatest : T.inLatest, legend: T.legend, packages: T.packages };
   let gen = 0;
   // Searches started; one that waited for the text index and is no
   // longer the newest draws nothing.
   let asked = 0;
   const draw = (): void => { if (list) render(<Results {...list} sel={sel} />, box!); };
+
+  // The excerpts and the packages wait for typing to pause this long;
+  // excerpts come for the first SHOWN hits, about what the list shows.
+  const PAUSE = 250;
+  const SHOWN = 12;
+  let later = 0;
 
   // mark, show and search run only once q is known to exist (below).
   const mark = (i: number): void => {
@@ -711,7 +774,10 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
     if (word.test(t)) return 2.2;
     if (short) return -1;
     if (terms.every((w) => has(t, w))) return 2.5;
-    const hay = t + " " + (e.x + " " + e.p).toLowerCase();
+    // Excerpts count only where the index carries them (a package's);
+    // elsewhere they come later, for the hits shown, and the text index
+    // holds their words.
+    const hay = t + " " + ((scoped ? e.x : "") + " " + e.p).toLowerCase();
     if (terms.every((w) => has(hay, w))) return 4;
     return -1;
   };
@@ -725,7 +791,7 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
       data = await load();
     } catch {
       // Offline, or the index is missing mid-deploy: say so in the list.
-      list = { hits: null, terms: [], root, elsewhere: "", gen: ++gen, text };
+      list = { hits: null, pkgs: [], terms: [], root, elsewhere: "", gen: ++gen, text };
       draw();
       show(true);
       status!.textContent = T.down;
@@ -738,15 +804,19 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
     // headings; none below three letters. A missing text index only
     // leaves them out.
     let inText: Set<number> | null = null;
-    if (weight(query) >= 3) {
-      const mine = ++asked;
-      try { await loadText(); } catch {}
+    const mine = ++asked;
+    const withPkgs = !scoped && weight(query) >= 3;
+    if (weight(query) >= 3 && !scoped) {
+      // An entry counts when every term the index can hold found it.
+      const held = alts.filter((t) => !STOP.has(t[0]!) && (/[\uac00-\ud7a3]/.test(t[0]!) || t[0]!.length >= 3));
+      const loaded = new Map<string, Shard>();
+      let ok = true;
+      await Promise.all([...new Set(held.flat().map(shardOf))].map((k) => loadShard(k).then((sh) => { loaded.set(k, sh); }, () => { ok = false; })));
       if (mine !== asked) return;
-      if (words) {
-        // An entry counts when every term the index can hold found it.
-        const held = alts.filter((t) => !STOP.has(t[0]!) && (/[\uac00-\ud7a3]/.test(t[0]!) || t[0]!.length >= 3));
+      // A missing shard only leaves the text out.
+      if (ok) {
         const count = new Map<number, number>();
-        for (const t of held) for (const id of textHits(t) || []) count.set(id, (count.get(id) || 0) + 1);
+        for (const t of held) for (const id of textHits(t, loaded) || []) count.set(id, (count.get(id) || 0) + 1);
         inText = new Set<number>();
         if (held.length) for (const [id, n] of count) if (n === held.length) inText.add(id);
       }
@@ -761,14 +831,16 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
     });
     hits.sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2] || a[3] - b[3]);
     // An open list eases to its new height; a closed one fades in (.appear).
-    const shown: Shown[] = hits.slice(0, 40).map(([, , , , e]) => ({ t: e.t, u: e.u, p: e.p, x: e.x, tag: e.k ? KIND[e.k] || e.k : where(e.u) }));
+    const top40 = hits.slice(0, 40).map(([, , , , e]) => e);
+    const show1 = (e: Entry): Shown => ({ t: e.t, u: e.u, p: e.p, x: e.x, tag: e.k ? KIND[e.k] || e.k : where(e.u) });
+    const shown: Shown[] = top40.map(show1);
     // Another version may have it: an older one lacks newer pages.
     const elsewhere = !hits.length && scoped
       ? (document.body.dataset.all || "") + encodeURIComponent(q!.value.trim())
       : !hits.length && /^\/\d+\.\d+(\.\d+)?\/$|^\/dev\/$/.test(root)
         ? "/latest" + (ko ? "/ko" : "") + "?q=" + encodeURIComponent(q!.value.trim()) : "";
     const fill = (): void => {
-      list = { hits: shown, terms: alts.flat(), root: sroot, elsewhere, gen: ++gen, text };
+      list = { hits: shown, pkgs: [], terms: alts.flat(), root: sroot, elsewhere, gen: ++gen, text };
       sel = -1;
       draw();
     };
@@ -776,6 +848,33 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
     show(true);
     status!.textContent = !hits.length ? T.none : T.found(Math.min(hits.length, 40), hits.length);
     mark(links().length ? 0 : -1);
+    const drawn = gen;
+    // Then the excerpts of the hits shown, and the packages; each draws
+    // the list again, the selection kept, while it is this search's.
+    const again = (change: () => void): void => {
+      if (drawn !== gen || !list) return;
+      resize(box!, () => { change(); draw(); });
+    };
+    // Only once typing pauses: the words typed on the way would each
+    // fetch the excerpts of their own hits.
+    clearTimeout(later);
+    later = window.setTimeout(() => {
+      excerpts(top40.slice(0, SHOWN)).then(() => again(() => { list!.hits = top40.map(show1); }));
+      if (withPkgs) {
+        loadPkgs().then((all) => {
+          const found: [number, number, Entry][] = [];
+          for (const e of all) {
+            const sc = score(e, query, alts, false);
+            if (sc >= 0) found.push([sc, e.k === "package" ? 0 : 1, e]);
+            else if (e.k === "package" && terms.every((w) => e.x.toLowerCase().includes(w))) found.push([4, 0, e]);
+          }
+          found.sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2].t.length - b[2].t.length);
+          if (!found.length) return;
+          again(() => { list!.pkgs = found.slice(0, 5).map(([, , e]) => ({ ...show1(e), tag: KIND[e.k] || e.k, abs: true })); });
+          status!.textContent = T.found(Math.min(hits.length, 40) + Math.min(found.length, 5), hits.length + found.length);
+        }, () => {});
+      }
+    }, PAUSE);
   };
 
   if (!q) return;
@@ -803,7 +902,7 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
     if (top && top.classList.contains("nav-compact")) { grow(true); q.focus(); }
   });
   q.addEventListener("blur", () => { if (!q.value) setTimeout(() => { if (document.activeElement !== q) grow(false); }, 150); });
-  q.addEventListener("focus", () => load().then(loadText).catch(() => {}), { once: true });
+  q.addEventListener("focus", () => load().catch(() => {}), { once: true });
   q.addEventListener("input", search);
   q.addEventListener("keydown", (ev) => {
     const n = links().length;
@@ -822,6 +921,7 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
   let help: HelpBox | null = null;
   const buildHelp = (): void => {
     const rows: Row[] = [["/", T.rows.search]];
+    if (window.nabiPalette) rows.push([/Mac|iPhone|iPad/.test(navigator.platform) ? "⌘ K" : "Ctrl K", T.rows.all]);
     if (document.querySelector(".pager")) rows.push(["[  ]", T.rows.pager]);
     if (document.querySelector(".api-filter")) rows.push(["f", T.rows.filter]);
     rows.push(["?", T.rows.help], ["Esc", T.rows.esc]);

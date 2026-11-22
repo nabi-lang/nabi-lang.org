@@ -298,6 +298,16 @@ pub fn write(site: Site, docs_root: str, dir: str, chrome: str) throws -> usize 
         files.insert(lp + "packages/index.html", index_page(site, listed, chrome, lp));
         files.insert(lp + "packages/search-index.json", pidx);
     }
+    // The docs search's Packages group and the search palette read every
+    // package's API at once: names only, from the newest versions.
+    let parts: List<(str, str)> = List::new();
+    for (p, _) in listed {
+        if let idx: str = files.get(f"packages/{p.name}/latest/search-index.json") { parts.push((p.name + "/latest/", idx)); }
+    }
+    let api = pkg::search::merge(parts);
+    files.insert("packages/search-api.json", api);
+    files.insert("ko/packages/search-api.json", api);
+    files.insert("packages/sitemap.xml", sitemap(site, dir, listed, files));
     for gone in [docs_root + "/packages", docs_root + "/ko/packages"] {
         if fs::exists(gone) { try fs::remove_dir_all(gone); }
     }
@@ -308,6 +318,32 @@ pub fn write(site: Site, docs_root: str, dir: str, chrome: str) throws -> usize 
         try fs::write(path, links::site_hrefs(site, moved(site, files[k], k.starts_with("ko/")), "", k));
     }
     files.len()
+}
+
+/// The sitemap of the package docs: the list and each package's newest
+/// pages (`latest/`), last modified when their docs were fetched from the
+/// registry into `dir`.
+fn sitemap(site: Site, dir: str, listed: List<(DocsPackage, str)>, files: Dict<str, str>) -> str {
+    let urls: List<(str, str)> = [(site.docs_url + "/packages", "")].to_list();
+    for (p, v) in listed {
+        let when = fetched_on(f"{dir}/{p.name}/{v}.nabion");
+        let pre = f"packages/{p.name}/latest/";
+        let outs: List<str> = List::new();
+        for k in files.keys() {
+            if k.starts_with(pre) && k.ends_with(".html") { outs.push(k); }
+        }
+        outs.sort();
+        for o in outs { urls.push((site.docs_url + web::url::canon("/" + o), when)); }
+    }
+    pkg::www::sitemap(urls)
+}
+
+/// The day (`2026-11-22`, UTC) the file at `path` was last written, or
+/// `""`.
+fn fetched_on(path: str) -> str {
+    let m = try fs::metadata(path) catch _ { return ""; };
+    let t = try m.modified() catch _ { return ""; };
+    f"{std::time::Date::from_unix_days(t.unix_secs() / 86400i64)}"
 }
 
 #[test]

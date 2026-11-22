@@ -7,7 +7,7 @@ use pkg::Site;
 use core::crypto::HashAlgorithm;
 use core::encoding;
 use markdown::{Doc, Heading, Options, esc, strip_tags};
-use web::build::{clip, dir_of};
+use web::build::{between, clip, dir_of, json_str};
 use web::chrome;
 use web::url;
 
@@ -245,6 +245,12 @@ pub fn edit_link(url: str, date: str, ko: bool) -> str {
     let (ask, label) = if ko { ("잘못된 곳이 있나요?", "GitHub에서 이 페이지 고치기") } else { ("Found a mistake?", "Edit this page on GitHub") };
     let when = if date.is_empty() { "" } else if ko { f" <span class=\"upd\">마지막 수정 <time datetime=\"{esc(date)}\">{long_date(date, true)}</time></span>" } else { f" <span class=\"upd\">Last updated <time datetime=\"{esc(date)}\">{long_date(date, false)}</time></span>" };
     f"<p class=\"edit\">{ask} <a href=\"{esc(url)}\">{label}</a>.{when}</p>\n"
+}
+
+/// The date of a page's "Last updated" note (edit_link), or `""`.
+pub fn page_date(html: str) -> str {
+    let k = html.find("<span class=\"upd\">") ?? return "";
+    if let (d, _): (str, usize) = between(html, k, "datetime=\"", "\"") { d } else { "" }
 }
 
 const MONTHS: [str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
@@ -915,18 +921,32 @@ fn frame(site: Site, root: str, f: Frag, banner: str) -> str {
     let sfind = if !pkg { find } else if pname.is_empty() { tr(ko, "Search packages", "패키지 검색") } else { tr(ko, f"Search {pname}", f"{pname} 검색") };
     let note = if at.starts_with("spec/") { tr(ko, "<span>Spec text © 2026 DaminStudio and the Nabi contributors, <a href=\"https://creativecommons.org/licenses/by/4.0/\">CC BY 4.0</a></span>", "<span>사양 본문 © 2026 DaminStudio and the Nabi contributors, <a href=\"https://creativecommons.org/licenses/by/4.0/\">CC BY 4.0</a></span>") } else { "" };
     let img = if pkg { site.base_url + "/og.png" + (if site.og.is_empty() { "" } else { "?v=" + site.og }) } else { og_image(site, f) };
+    // Structured data: the docs home is a site with a search, every other
+    // page sits in a trail from it.
+    let ld = if lost { "" } else if at == "index.html" && !pkg {
+        json_ld(web_site(tr(ko, "Nabi Docs", "Nabi 문서"), latest(site, if ko { "ko/" } else { "" }), latest(site, if ko { "ko/" } else { "" }) + "?q={search_term_string}", ko))
+    } else {
+        let trail: List<(str, str)> = [(tr(ko, "Nabi Docs", "Nabi 문서"), latest(site, if ko { "ko/" } else { "" }))].to_list();
+        if pkg {
+            trail.push((tr(ko, "Package docs", "패키지 문서"), site.docs_url + (if ko { "/ko" } else { "" }) + "/packages"));
+        } else if !sec.is_empty() && at != sec_index {
+            trail.push((tr(ko, sec_en, sec_ko), latest(site, in_lang(sec_index, ko))));
+        }
+        trail.push((f.title, url));
+        json_ld(breadcrumbs(trail))
+    };
     let alt = if img.contains("/og/") { if f.title == name { name } else { f.title + " - " + name } } else { pkg::headline(site) };
     f"<!doctype html>
 <html class=\"nb lt\" lang=\"{lang}\">
 <head>
-{head(site, root, full, desc, url, img, alt, robots + f.head, ko)}</head>
-<body class=\"{kind}\" data-root=\"{root}\"{if pkg { f" data-search=\"/{esc(pkg_base(out))}\" data-all=\"{esc(site.packages)}/packages?q=\" data-all-label=\"{tr(ko, "Search all packages on the registry →", "레지스트리에서 모든 패키지 찾기 →")}\"" } else { "" }} data-version=\"{if pkg { "" } else { esc(site.version) }}\" data-play=\"{play}\">
+{head(site, root, full, desc, url, img, alt, robots + f.head + ld, ko)}</head>
+<body class=\"{kind}\" data-root=\"{root}\" data-registry=\"{esc(site.packages)}\"{if pkg { f" data-search=\"/{esc(pkg_base(out))}\" data-all=\"{esc(site.packages)}/packages?q=\" data-all-label=\"{tr(ko, "Search all packages on the registry →", "레지스트리에서 모든 패키지 찾기 →")}\"" } else { "" }} data-version=\"{if pkg { "" } else { esc(site.version) }}\" data-play=\"{play}\">
 <a class=\"skip\" href=\"#content\">{skip}</a>
 <header class=\"hdr top{if pkg { " pkg-hdr" } else { "" }}\" lang=\"{lang}\">
 <div class=\"in\">
 {if pkg { pkg_bar(site, f, ko) } else { f"<a class=\"brand\" href=\"{root}{in_lang("index.html", ko)}\" lang=\"en\">{web::chrome::wordmark("Nabi")}<span class=\"sl\" aria-hidden=\"true\">/</span><span class=\"site\">docs</span></a>\n{TOGGLE.replace("aria-label=\"Menu\"", f"aria-label=\"{menu}\"")}\n<nav id=\"nav\" class=\"nav main-nav\" aria-label=\"{sections}\">{nav.to_str()}</nav>" }}
 <div class=\"tools\">
-<div class=\"search\" role=\"search\"><button type=\"button\" class=\"s-open\" aria-label=\"{sfind}\" tabindex=\"-1\" aria-hidden=\"true\">{ICON_SEARCH}</button><input id=\"q\" type=\"search\" placeholder=\"{sfind}\" aria-label=\"{sfind}\" aria-keyshortcuts=\"/ Control+K Meta+K\" autocomplete=\"off\" role=\"combobox\" aria-autocomplete=\"list\" aria-expanded=\"false\" aria-controls=\"results\"><kbd class=\"kbd\" aria-hidden=\"true\">/</kbd><ul id=\"results\" class=\"results appear\" role=\"listbox\" aria-label=\"{results}\" hidden></ul><p class=\"sr-only\" role=\"status\"></p></div>
+<div class=\"search\" role=\"search\"><button type=\"button\" class=\"s-open\" aria-label=\"{sfind}\" tabindex=\"-1\" aria-hidden=\"true\">{ICON_SEARCH}</button><input id=\"q\" type=\"search\" placeholder=\"{sfind}\" aria-label=\"{sfind}\" aria-keyshortcuts=\"/\" autocomplete=\"off\" role=\"combobox\" aria-autocomplete=\"list\" aria-expanded=\"false\" aria-controls=\"results\"><kbd class=\"kbd\" aria-hidden=\"true\">/</kbd><ul id=\"results\" class=\"results appear\" role=\"listbox\" aria-label=\"{results}\" hidden></ul><p class=\"sr-only\" role=\"status\"></p></div>
 {if pkg { "" } else { f"<details class=\"vers\"><summary aria-label=\"{version}: {ver}\">{ver}</summary><ul class=\"vers-menu\">{vers_items(site, root, out, lost)}</ul></details>" }}
 {switch}
 {chrome::theme_button(ko)}
@@ -942,15 +962,43 @@ fn frame(site: Site, root: str, f: Frag, banner: str) -> str {
 </div>
 {footer(site, links, note, root + "logo.svg", ko, "docs")}<script src=\"{asset(site, root, "keys.js")}\" defer></script>
 <script src=\"{asset(site, root, "copy.js")}\" defer></script>
-<script src=\"{asset(site, root, "search.js")}\" defer></script>
+{chrome::palette_script(asset(site, root, "palette.js"), chrome::Palette { pkgdocs: if ko { "/ko/packages/" } else { "/packages/" }, registry: site.packages })}<script src=\"{asset(site, root, "search.js")}\" defer></script>
 </body>
 </html>
 "
 }
 
+/// `obj` (JSON) as a page's structured data, for `<head>`.
+pub fn json_ld(obj: str) -> str { f"<script type=\"application/ld+json\">{obj.replace("</", "<\\/")}</script>\n" }
+
+/// schema.org WebSite `name` at `url`, searched at `search` (its
+/// `{search_term_string}` the query).
+pub fn web_site(name: str, url: str, search: str, ko: bool) -> str {
+    f"{{\"@context\":\"https://schema.org\",\"@type\":\"WebSite\",\"name\":{json_str(name)},\"url\":{json_str(url)},\"inLanguage\":\"{if ko { "ko" } else { "en" }}\",\"potentialAction\":{{\"@type\":\"SearchAction\",\"target\":{{\"@type\":\"EntryPoint\",\"urlTemplate\":{json_str(search)}}},\"query-input\":\"required name=search_term_string\"}}}}"
+}
+
+/// schema.org BreadcrumbList of `trail`, each `(name, url)`.
+pub fn breadcrumbs(trail: List<(str, str)>) -> str {
+    let items: List<str> = List::new();
+    for (name, u) in trail {
+        items.push(f"{{\"@type\":\"ListItem\",\"position\":{items.len() + 1},\"name\":{json_str(name)},\"item\":{json_str(u)}}}");
+    }
+    f"{{\"@context\":\"https://schema.org\",\"@type\":\"BreadcrumbList\",\"itemListElement\":[{items.join(",")}]}}"
+}
+
+/// schema.org SoftwareApplication of the toolchain at its release.
+pub fn software(site: Site, ko: bool) -> str {
+    let dl = site.base_url + (if ko { "/ko" } else { "" }) + "/download";
+    let desc = if ko { DESC_KO } else { site.description };
+    f"{{\"@context\":\"https://schema.org\",\"@type\":\"SoftwareApplication\",\"name\":\"Nabi\",\"description\":{json_str(desc)},\"url\":{json_str(site.base_url + "/")},\"applicationCategory\":\"DeveloperApplication\",\"operatingSystem\":\"macOS, Windows, Linux, FreeBSD\",\"softwareVersion\":{json_str(site.release)},\"downloadUrl\":{json_str(dl)},\"license\":\"https://github.com/nabi-lang/nabi/blob/main/LICENSE-MIT\",\"offers\":{{\"@type\":\"Offer\",\"price\":\"0\",\"priceCurrency\":\"USD\"}},\"author\":{{\"@type\":\"Organization\",\"name\":\"DaminStudio\",\"url\":\"https://daminstudio.com\"}}}}"
+}
+
 /// A page of the home site (nabi-lang.org): no search, its nav into the
 /// newest docs. The landing page (`index.html`) brings its own layout.
-pub fn www_page(site: Site, out: str, title: str, body: str) -> str {
+pub fn www_page(site: Site, out: str, title: str, body: str) -> str { www_page_with(site, out, title, body, "") }
+
+/// www_page with `more` in `<head>` (a robots line).
+pub fn www_page_with(site: Site, out: str, title: str, body: str, more: str) -> str {
     // A Korean page is `ko/<page>`; `at` is the page either way.
     let ko = out.starts_with("ko/");
     let at = if ko { out["ko/".len():] } else { out };
@@ -964,10 +1012,11 @@ pub fn www_page(site: Site, out: str, title: str, body: str) -> str {
     nav.push_str(nav_item(esc(site.playground), tr(ko, "Playground", "플레이그라운드"), false));
     nav.push_str(nav_item(esc(site.packages), tr(ko, "Packages", "패키지"), false));
     nav.push_str(nav_item(home + "roadmap.html", tr(ko, "Roadmap", "로드맵"), at == "roadmap.html"));
+    nav.push_str(nav_item(home + "community.html", tr(ko, "Community", "커뮤니티"), at == "community.html"));
     // "Download Nabi" is "Download - Nabi", not "Download Nabi - Nabi".
     let short = title.strip_suffix(" " + site.title) ?? title;
     let full = if at == "index.html" { if ko { f"{site.title}: {TAGLINE_KO}" } else { pkg::headline(site) } } else { short + " - " + site.title };
-    let page_url = |o: str| if o == "index.html" { site.base_url + "/" } else if o == "ko/index.html" { site.base_url + "/ko/" } else { site.base_url + "/" + url::canon(o) };
+    let page_url = |o: str| if o == "index.html" { site.base_url + "/" } else if o == "ko/index.html" { site.base_url + "/ko" } else { site.base_url + "/" + url::canon(o) };
     let url = if out == "404.html" { "" } else { page_url(out) };
     // Both languages of a page link to each other; the switch sits in
     // the header.
@@ -992,10 +1041,16 @@ pub fn www_page(site: Site, out: str, title: str, body: str) -> str {
         site.base_url + "/og.png" + (if site.og.is_empty() { "" } else { "?v=" + site.og })
     };
     let lang = if ko { "ko" } else { "en" };
+    // Structured data: the site with its search (the docs'), and the
+    // toolchain on the landing and download pages.
+    let ld = if at == "index.html" {
+        json_ld(web_site(site.title, page_url(out), latest(site, if ko { "ko/" } else { "" }) + "?q={search_term_string}", ko)) + json_ld(software(site, ko))
+    } else if at == "download.html" { json_ld(software(site, ko)) } else { "" };
+    let extra = more + (if at == "index.html" { alt_head + f"<link rel=\"me\" href=\"{chrome::MASTODON}\">\n" } else { alt_head }) + ld;
     f"<!doctype html>
 <html class=\"nb lt\" lang=\"{lang}\">
 <head>
-{head(site, root, full, desc, url, img, pkg::headline(site), if at == "index.html" { alt_head + f"<link rel=\"me\" href=\"{chrome::MASTODON}\">\n" } else { alt_head }, ko)}</head>
+{head(site, root, full, desc, url, img, pkg::headline(site), extra, ko)}</head>
 <body class=\"{kind} www\" data-root=\"{root}\" data-play=\"{esc(site.playground)}\">
 <a class=\"skip\" href=\"#content\">{tr(ko, "Skip to content", "본문으로 건너뛰기")}</a>
 <header class=\"hdr top\" lang=\"{lang}\">
@@ -1004,6 +1059,7 @@ pub fn www_page(site: Site, out: str, title: str, body: str) -> str {
 {TOGGLE.replace("aria-label=\"Menu\"", f"aria-label=\"{tr(ko, "Menu", "메뉴")}\"")}
 <nav id=\"nav\" class=\"nav main-nav\" aria-label=\"{tr(ko, "Main", "주 메뉴")}\">{nav.to_str()}</nav>
 <div class=\"tools\">
+{chrome::palette_button(ko)}
 <a class=\"gh\" href=\"https://github.com/nabi-lang/nabi\">GitHub</a>
 <a class=\"btn btn-sm\" href=\"{home}download.html\"{install}>{tr(ko, "Install", "설치")}</a>
 {switch}
@@ -1013,8 +1069,9 @@ pub fn www_page(site: Site, out: str, title: str, body: str) -> str {
 </header>
 <main id=\"content\">
 {main}</main>
-{footer(site, links, "", root + "logo.svg", ko, "home")}<script src=\"{asset(site, root, "copy.js")}\" defer></script>
-<script src=\"{asset(site, root, "search.js")}\" defer></script>
+{footer(site, links, "", root + "logo.svg", ko, "home")}<script src=\"{asset(site, root, "keys.js")}\" defer></script>
+<script src=\"{asset(site, root, "copy.js")}\" defer></script>
+{chrome::palette_script(asset(site, root, "palette.js"), chrome::Palette { docs: site.docs_url + "/latest/", pkgdocs: site.docs_url + (if ko { "/ko" } else { "" }) + "/packages/", registry: site.packages })}<script src=\"{asset(site, root, "search.js")}\" defer></script>
 </body>
 </html>
 "

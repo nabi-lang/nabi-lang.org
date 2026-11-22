@@ -49,6 +49,7 @@ use std::env;
 use std::fs;
 use std::nabion;
 use std::process;
+use std::process::{Command, Stdio};
 use web::build::{png_size, write};
 use web::kit;
 
@@ -229,12 +230,28 @@ pub struct Updated {
 }
 
 pub fn updated(root: str) -> Dict<str, str> {
-    let text = try fs::read_to_str(root + "/updated.nabion") catch _ { return Dict::new(); };
+    let text = try fs::read_to_str(root + "/updated.nabion") catch _ { return git_dates(root); };
     let u: Updated = try nabion::from_str(text) catch e {
         eprintln(f"note: {root}/updated.nabion: {e}");
         return Dict::new();
     };
     u.pages
+}
+
+/// Without updated.nabion (a local checkout): each file's last commit
+/// date from git, by path below `root`; empty outside a git checkout.
+fn git_dates(root: str) -> Dict<str, str> {
+    let out: Dict<str, str> = Dict::new();
+    let r = try Command::new("git").args(["-C", root, "log", "--format=%x01%cs", "--name-only", "--relative", "--", "."]).stdin(Stdio::Null).stderr(Stdio::Null).output() catch _ { return out; };
+    if !r.status.success() { return out; }
+    let date = "";
+    // newest first: a path's first date is its last change
+    for l in ((try? str::from_utf8(r.stdout)) ?? "").lines() {
+        if let d: str = l.strip_prefix("\u{1}") { date = d.trim(); continue; }
+        let p = l.trim();
+        if !p.is_empty() && !out.contains_key(p) { out.insert(p, date); }
+    }
+    out
 }
 
 /// `site.nabion`, with the fields of `site.local.nabion` (git-ignored,

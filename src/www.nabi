@@ -12,12 +12,33 @@ use std::nabion;
 use std::process::{Command, Stdio};
 use web::build::{between, write};
 use web::chrome;
+use web::kit;
+use pkg::layout::tr;
 
-pub fn sitemap(urls: List<str>) -> str {
+/// A sitemap of `urls`, each `(address, last modified)`; a date of `""`
+/// gives no `<lastmod>`.
+pub fn sitemap(urls: List<(str, str)>) -> str {
     let b = StrBuf::new();
     b.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n");
-    for u in urls { b.push_str(f"<url><loc>{markdown::esc(u)}</loc></url>\n"); }
+    for (u, when) in urls {
+        let lm = if when.is_empty() { "" } else { f"<lastmod>{markdown::esc(when)}</lastmod>" };
+        b.push_str(f"<url><loc>{markdown::esc(u)}</loc>{lm}</url>\n");
+    }
     b.push_str("</urlset>\n");
+    b.to_str()
+}
+
+/// The sitemap index of every Nabi host (sitemap-index.xml on
+/// nabi-lang.org): its own sitemap, the docs' (latest/) and the package
+/// docs', and the registry's. Each host's robots.txt names it, so search
+/// engines take the sitemaps of the other hosts from it.
+pub fn sitemap_index(site: Site) -> str {
+    let b = StrBuf::new();
+    b.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<sitemapindex xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n");
+    for u in [site.base_url + "/sitemap.xml", site.docs_url + "/sitemap.xml", site.docs_url + "/packages/sitemap.xml", site.packages + "/sitemap.xml"] {
+        b.push_str(f"<sitemap><loc>{markdown::esc(u)}</loc></sitemap>\n");
+    }
+    b.push_str("</sitemapindex>\n");
     b.to_str()
 }
 
@@ -196,9 +217,11 @@ pub fn feed(site: Site, posts: List<Post>, lang: str) -> str {
 /// newest docs with `docs:<path>` (a Korean page into the Korean docs);
 /// `latest` holds latest/'s pages, so an Error codes link shows only if
 /// those have them.
-pub fn pages(ref site: Site, own: List<Page>, ko_own: List<Page>, latest: Set<str>) throws -> (Dict<str, str>, List<str>, List<(str, str)>) {
+pub fn pages(ref site: Site, own: List<Page>, ko_own: List<Page>, latest: Set<str>) throws -> (Dict<str, str>, List<(str, str)>, List<(str, str)>) {
     let www: Dict<str, str> = Dict::new();
-    let urls: List<str> = List::new();
+    let urls: List<(str, str)> = List::new();
+    // When each source last changed, for the sitemap.
+    let upd = pkg::updated(site.www);
     let cards: List<(str, str)> = List::new();
     let docs_no_errors = site.no_errors;
     if latest.len() > 0 { site.no_errors = !latest.contains("errors/index.html"); }
@@ -213,7 +236,7 @@ pub fn pages(ref site: Site, own: List<Page>, ko_own: List<Page>, latest: Set<st
             }
         }
         let news = try posts(site, f"{site.www}/{dir}news", dir);
-        for name in ["index", "download", "roadmap", "faq", "news/index", "privacy", "terms"] {
+        for name in ["index", "download", "roadmap", "faq", "news/index", "community", "governance", "brand", "privacy", "terms"] {
             let path = f"{site.www}/{dir}{name}.md";
             if !fs::exists(path) { continue; }
             let (title, html) = try render(site, path, dir);
@@ -221,14 +244,31 @@ pub fn pages(ref site: Site, own: List<Page>, ko_own: List<Page>, latest: Set<st
             let body = if name == "index" { home::body(site, examples, sizes, ko) } else if name == "download" { download_page(html, sizes) } else if name == "news/index" { html + post_list(news, ko) } else { html };
             if name != "index" { cards.push((out, title)); }
             www.insert(out, layout::www_page(site, out, title, body));
-            urls.push(site.base_url + "/" + dir + if name == "index" { "" } else if name == "news/index" { "news" } else { name });
+            // `/ko`, not `/ko/`, which 301s to it.
+            let at = if name == "index" { if ko { "/ko" } else { "/" } } else { "/" + dir + if name == "news/index" { "news" } else { name } };
+            urls.push((site.base_url + at, upd.get(dir + name + ".md") ?? ""));
         }
         www.insert(dir + "news/feed.xml", feed(site, news, dir));
+        // Releases: one page per toolchain version, from its CHANGELOG.md.
+        let rels = releases(site.library + "/../CHANGELOG.md");
+        if rels.len() > 0 {
+            let title = tr(ko, "Releases", "릴리스");
+            www.insert(dir + "releases/index.html", layout::www_page(site, dir + "releases/index.html", title, release_list(rels, ko)));
+            urls.push((f"{site.base_url}/{dir}releases", if rels[0].date.starts_with("2") { rels[0].date } else { "" }));
+            for r in rels {
+                let out = f"{dir}releases/{r.version}.html";
+                // The notes are English; the Korean page shows them under a
+                // note and stays out of search engines.
+                let more = if ko { "<meta name=\"robots\" content=\"noindex\">\n" } else { "" };
+                www.insert(out, layout::www_page_with(site, out, f"Nabi {r.version}", release_page(site, r, ko, f"{site.www}/{dir}news/nabi-{r.version}.md"), more));
+                if !ko { urls.push((f"{site.base_url}/releases/{r.version}", r.date)); }
+            }
+        }
         for p in news {
             let out = f"{dir}news/{p.name}.html";
             www.insert(out, layout::www_page(site, out, p.title, after_h1(p.html, dated(p, ko))));
             // A post goes into the sitemap once it is out.
-            if p.date.starts_with("2") { urls.push(f"{site.base_url}/{dir}news/{p.name}"); }
+            if p.date.starts_with("2") { urls.push((f"{site.base_url}/{dir}news/{p.name}", upd.get(f"{dir}news/{p.name}.md") ?? p.date)); }
         }
     }
     www.insert("404.html", layout::www_page(site, "404.html", "Page not found", layout::not_found(|p| layout::latest(site, p), false, site.no_errors)));
@@ -236,11 +276,84 @@ pub fn pages(ref site: Site, own: List<Page>, ko_own: List<Page>, latest: Set<st
     (www, urls, cards)
 }
 
+/// A toolchain release as CHANGELOG.md has it: `## <version> (<date>)`,
+/// then its summary (`Summary: ..` between `<!-- begin summary -->`
+/// markers) and its notes.
+pub struct Release {
+    pub version: str;
+    pub date: str;
+    pub summary: str;
+    pub notes: str;
+}
+
+/// The released sections of the CHANGELOG.md at `path`, newest first (as
+/// the file lists them); none without the file. A section dated
+/// `unreleased` is left out.
+pub fn releases(path: str) -> List<Release> {
+    let out: List<Release> = List::new();
+    let text = try fs::read_to_str(path) catch _ { return out; };
+    // Each section's heading and its lines.
+    let heads: List<str> = List::new();
+    let bodies: List<List<str>> = List::new();
+    for l in text.lines() {
+        if l.starts_with("## ") {
+            heads.push(l[3:]);
+            bodies.push(List::new());
+        } else if bodies.len() > 0 {
+            bodies[bodies.len() - 1].push(l);
+        }
+    }
+    for k in 0..heads.len() {
+        let (v, rest) = heads[k].split_once(" (") ?? (heads[k], ")");
+        let date = rest.trim_end_matches(")").trim();
+        if !date.starts_with("2") { continue; }
+        let summary = "";
+        let notes = StrBuf::new();
+        for l in bodies[k] {
+            let t = l.trim();
+            if t.starts_with("<!--") && t.ends_with("-->") { continue; }
+            if let sum: str = t.strip_prefix("Summary: ") {
+                summary = sum;
+                continue;
+            }
+            // under the page's h1: a section's `###` is an h2
+            notes.push_str(if l.starts_with("### ") { l[1:] } else { l });
+            notes.push('\n');
+        }
+        out.push(Release { version: v.trim(), date: date, summary: summary, notes: notes.to_str().trim() });
+    }
+    out
+}
+
+/// releases/index.html: every release, newest first, with its date and
+/// summary.
+pub fn release_list(rels: List<Release>, ko: bool) -> str {
+    let b = StrBuf::new();
+    b.push_str(f"<h1>{tr(ko, "Releases", "릴리스")}</h1>\n<div class=\"lead-sm\">{tr(ko, "Every release of the Nabi toolchain, newest first, with its notes from <a href=\"https://github.com/nabi-lang/nabi/blob/main/CHANGELOG.md\">CHANGELOG.md</a>. Before 1.0 the minor version is the breaking slot; only the latest series gets fixes.", "Nabi 툴체인의 모든 릴리스를 새것부터 적었습니다. 노트는 <a href=\"https://github.com/nabi-lang/nabi/blob/main/CHANGELOG.md\">CHANGELOG.md</a>에서 가져오며 영어로 씁니다. 1.0 전에는 부 버전이 호환을 깨는 자리이고, 수정은 가장 최근 계열에만 나옵니다.")}</div>\n<ul class=\"posts\">");
+    for r in rels {
+        let sum = if r.summary.is_empty() { "" } else { f"<p lang=\"en\">{markdown::esc(r.summary)}</p>" };
+        b.push_str(f"<li><a href=\"{markdown::esc(r.version)}.html\">Nabi {markdown::esc(r.version)}</a> <p class=\"post-date\"><time datetime=\"{markdown::esc(r.date)}\">{layout::long_date(r.date, ko)}</time></p>{sum}</li>");
+    }
+    b.push_str("</ul>\n");
+    b.to_str()
+}
+
+/// releases/<version>.html: the release's date, its summary and notes,
+/// and where to get it; `post` is its announcement's source, linked when
+/// there.
+pub fn release_page(site: Site, r: Release, ko: bool, post: str) -> str {
+    let notes = layout::md(r.notes, |h| h, false).html;
+    let ann = if fs::exists(post) { f" <a href=\"../news/nabi-{markdown::esc(r.version)}.html\">{tr(ko, "Announcement", "발표")}</a>" } else { "" };
+    let note = if ko { "<p class=\"note\">릴리스 노트는 영어로만 씁니다.</p>\n" } else { "" };
+    let sum = if r.summary.is_empty() { "" } else { f"<p class=\"lead-sm\" lang=\"en\">{markdown::esc(r.summary)}</p>\n" };
+    f"<h1>Nabi {markdown::esc(r.version)}</h1>\n<p class=\"post-date\"><time datetime=\"{markdown::esc(r.date)}\">{layout::long_date(r.date, ko)}</time></p>\n{note}{sum}<div lang=\"en\">{pkg::home::refs(notes)}</div>\n<p><a href=\"https://github.com/nabi-lang/nabi/releases/tag/v{markdown::esc(r.version)}\">{tr(ko, "Release on GitHub", "GitHub 릴리스")}</a>{ann} <a href=\"../download.html\">{tr(ko, "Download", "내려받기")}</a> <a href=\"index.html\">{tr(ko, "All releases", "모든 릴리스")}</a></p>\n"
+}
+
 /// The home site written into `dir`: `pages` (www::pages) with canonical
 /// links, the static files, the list of `cards` (og.nabion), the
 /// installers from the toolchain checkout, robots.txt, security.txt and
 /// the sitemap of `urls`; the static names, for the link check.
-pub fn write_to(site: Site, dir: str, pages: Dict<str, str>, urls: List<str>, cards: List<(str, str)>) throws -> Set<str> {
+pub fn write_to(site: Site, dir: str, pages: Dict<str, str>, urls: List<(str, str)>, cards: List<(str, str)>) throws -> Set<str> {
     for out in pages.keys() { try write(dir, out, site_hrefs(site, pages[out], "", out)); }
     let statics = try copy_static(dir);
     let list: List<layout::Card> = List::new();
@@ -252,9 +365,12 @@ pub fn write_to(site: Site, dir: str, pages: Dict<str, str>, urls: List<str>, ca
         try fs::copy(installers_dir(site) + "/" + f, dir + "/" + f);
         statics.insert(f);
     }
-    try write(dir, "robots.txt", f"User-agent: *\nAllow: /\nSitemap: {site.base_url}/sitemap.xml\n");
+    // The brand files /brand offers (web kit).
+    for name in try kit::copy_fonts(kit::BRAND_DIR, dir + "/brand") { statics.insert("brand/" + name); }
+    try write(dir, "robots.txt", f"User-agent: *\nAllow: /\nSitemap: {site.base_url}/sitemap.xml\nSitemap: {site.base_url}/sitemap-index.xml\n");
     try write(dir, ".well-known/security.txt", chrome::security_txt(site.base_url));
     try write(dir, "sitemap.xml", sitemap(urls));
+    try write(dir, "sitemap-index.xml", sitemap_index(site));
     statics
 }
 
@@ -279,4 +395,17 @@ fn post_dates() {
 fn comment_lines_go() {
     let t = uncommented("# T\n<!-- date: unreleased -->\ntext <!-- kept -->\n");
     assert(t == "# T\ntext <!-- kept -->\n", t);
+}
+
+#[test]
+fn changelog_releases() {
+    let path = "target/changelog-test.md";
+    try fs::write(path, "# Changelog\n\n## 0.2.0 (unreleased)\n\n- next\n\n## 0.1.1 (2026-11-22)\n\n<!-- begin summary -->\nSummary: A fix release.\n<!-- end summary -->\n\n### Highlights\n\n- a fix (#11)\n\n## 0.1.0 (2026-11-20)\n\n- first\n") catch _ { panic("write"); };
+    let rs = releases(path);
+    assert(rs.len() == 2 && rs[0].version == "0.1.1" && rs[0].date == "2026-11-22" && rs[0].summary == "A fix release." && rs[0].notes.starts_with("## Highlights") && !rs[0].notes.contains("<!--"), rs[0].notes);
+    assert(rs[1].version == "0.1.0" && rs[1].notes == "- first", "oldest");
+    let site = Site { title: "", tagline: "", spec_repo: "", packages: "" };
+    let page = release_page(site, rs[0], false, "nope.md");
+    assert(page.contains("<h1>Nabi 0.1.1</h1>") && page.contains("issues/11") && page.contains("releases/tag/v0.1.1") && !page.contains("Announcement"), page);
+    assert(release_list(rs, true).contains("<a href=\"0.1.0.html\">Nabi 0.1.0</a>"), "list");
 }

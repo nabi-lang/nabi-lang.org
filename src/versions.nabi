@@ -81,15 +81,17 @@ pub fn root(ref site: Site, vs: Versions, docs_root: str, www_dir: str, latest_o
     }
     try write(docs_root, "versions.json", f"{{\"latest\":{json_str(newest)},\"released\":[{list.to_str()}],\"patches\":{{{patches.to_str()}}}}}\n");
     try write(docs_root, "index.html", layout::to_latest(site));
-    try write(docs_root, "robots.txt", f"User-agent: *\nDisallow: /dev/\nSitemap: {site.docs_url}/sitemap.xml\n");
+    try write(docs_root, "robots.txt", f"User-agent: *\nDisallow: /dev/\nSitemap: {site.docs_url}/sitemap.xml\nSitemap: {site.docs_url}/packages/sitemap.xml\nSitemap: {site.base_url}/sitemap-index.xml\n");
     // The sitemap lists latest/: this build's pages if it is the newest
-    // release, else the archived ones.
+    // release, else the archived ones; a page's date is its "Last
+    // updated" one.
     if latest_outs.len() > 0 {
-        let urls: List<str> = List::new();
+        let urls: List<(str, str)> = List::new();
         for out in latest_outs {
-            if out != "404.html" && !latest_hidden.contains(out) { urls.push(layout::latest(site, if out == "index.html" { "" } else { out })); }
+            let when = if let html: str = latest.pages.get(out) { layout::page_date(html) } else { "" };
+            if out != "404.html" && !latest_hidden.contains(out) { urls.push((layout::latest(site, if out == "index.html" { "" } else { out }), when)); }
         }
-        urls.sort();
+        urls.sort_by(|a: (str, str), b: (str, str)| a.0.cmp(b.0));
         try write(docs_root, "sitemap.xml", sitemap(urls));
     }
     // latest/ follows the newest release, whether built now or re-wrapped

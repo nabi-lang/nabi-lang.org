@@ -5,13 +5,15 @@ use pkg::Site;
 use pkg::layout;
 use pkg::links::site_hrefs;
 use pkg::llms;
+
 use std::fs;
 use web::build::{dir_of, write};
 use web::kit;
 
 /// The pages of one version directory `dir` (`latest`, `0.1.0`, `dev`)
-/// under `docs_root`, linking within it, with its 404 page, search indexes
-/// (`text`: the body-text ones, English and Korean) and static files; the
+/// under `docs_root`, linking within it, with its 404 page, search files
+/// (from the indexes `search` and `search_ko` and the body-text ones in
+/// `text`, English and Korean; search::split) and static files; the
 /// static names.
 pub fn write_version(site: Site, docs_root: str, dir: str, files: Dict<str, str>, search: str, search_ko: str, text: (str, str), llm: (str, str)) throws -> Set<str> {
     let vdir = docs_root + "/" + dir;
@@ -20,27 +22,33 @@ pub fn write_version(site: Site, docs_root: str, dir: str, files: Dict<str, str>
     for out in files.keys() { try write(vdir, out, site_hrefs(site, files[out], base, out)); }
     try write(vdir, "404.html", site_hrefs(site, layout::not_found_page(site, dir, false), base, "404.html"));
     try write(vdir, "ko/404.html", site_hrefs(site, layout::not_found_page(site, dir, true), base, "ko/404.html"));
-    try write(vdir, "search-index.json", search);
     let statics = try copy_static(vdir);
-    statics.insert("search-index.json");
-    if !text.0.is_empty() {
-        try write(vdir, "search-text.json", text.0);
-        statics.insert("search-text.json");
-    }
-    if !text.1.is_empty() {
-        try write(vdir, "ko/search-text.json", text.1);
-        statics.insert("ko/search-text.json");
+    for (lang, idx, words) in [("", search, text.0), ("ko/", search_ko, text.1)] {
+        if idx.is_empty() { continue; }
+        for name in try write_search(vdir, lang, pkg::search::split(idx, words)) { statics.insert(name); }
     }
     if !llm.0.is_empty() {
         let at = site.docs_url + "/" + dir;
         try write(vdir, "llms.txt", llm.0.replace(llms::BASE, at));
         try write(vdir, "llms-full.txt", llm.1.replace(llms::BASE, at));
     }
-    if !search_ko.is_empty() {
-        try write(vdir, "ko/search-index.json", search_ko);
-        statics.insert("ko/search-index.json");
-    }
     statics
+}
+
+/// One language's search files (search::Split) under `dir` + `lang`; the
+/// names written, from `dir`.
+fn write_search(dir: str, lang: str, sp: pkg::search::Split) throws -> List<str> {
+    let names: List<str> = [lang + "search-index.json"].to_list();
+    try write(dir, lang + "search-index.json", sp.names);
+    for k in 0..sp.excerpts.len() {
+        names.push(f"{lang}search-x/{k}.json");
+        try write(dir, f"{lang}search-x/{k}.json", sp.excerpts[k]);
+    }
+    for key in sp.text.keys() {
+        names.push(f"{lang}search-text/{key}.json");
+        try write(dir, f"{lang}search-text/{key}.json", sp.text[key]);
+    }
+    names
 }
 
 /// The names under static/, of the kit's files and of its fonts, without
