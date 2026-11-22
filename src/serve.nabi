@@ -398,33 +398,35 @@ fn page(f: str, path: str, query: str, docs: bool) -> Resp { Resp { status: 200,
 
 const FOREVER: str = "public, max-age=31536000, immutable";
 
-/// This server is the one place that says how long a response keeps
-/// (the proxy in front adds none). A file asked for by its current
-/// version (`?v=`, layout::asset and the og images) never changes: cache
-/// it for good. Pages of a released version (`/0.1.2/...`) and the fonts
-/// (the kit's, unversioned names) keep a day; pages of latest/, dev/ and
-/// nabi-lang.org five minutes, as do the search indexes. A page or font
-/// past its time is still shown once while it is fetched again
-/// (stale-while-revalidate). Every file also carries an ETag (handle), so
-/// a stale copy revalidates for free.
+/// The browser's copy of anything that can change with a deploy: checked
+/// on every load (a 304 by ETag, handle), so a deploy shows at once; the
+/// CDN in front keeps it a day, until the deploy purges it.
+const FRESH: str = "public, max-age=0, must-revalidate, s-maxage=86400";
+
+/// A version's pages that never change but with the site's chrome.
+const PINNED: str = "public, max-age=86400, stale-while-revalidate=604800";
+
+/// This server is the one place that says how long a response keeps. A
+/// file asked for by its current version (`?v=`, layout::asset and the
+/// og images) never changes: cached for good. The pages of an exact
+/// version, a release's (`/0.1.2/...`) or a package version's
+/// (`/packages/json/0.2.0/...`), keep a day. Everything else, pages of
+/// latest/, dev/, /0.1/ and nabi-lang.org, the search indexes, the fonts
+/// and any unversioned file, is FRESH.
 pub fn cache_for(f: str, path: str, query: str, docs: bool) -> str {
     if f.ends_with(".html") {
         let first = (path[1:].split_once("/") ?? (path[1:], "")).0;
-        // A package version's docs change only when the registry's scan
-        // does; latest/ and the list follow new versions.
         let pp = path.strip_prefix("/ko") ?? path;
         if docs && pp.starts_with("/packages/") {
             let rest = (pp["/packages/".len():].split_once("/") ?? ("", "")).1;
             let ver = (rest.split_once("/") ?? (rest, "")).0;
-            return if ver.split(".").count() == 3 { "public, max-age=86400, stale-while-revalidate=604800" } else { "public, max-age=300, stale-while-revalidate=86400" };
+            return if ver.split(".").count() == 3 { PINNED } else { FRESH };
         }
-        let released = docs && first.split(".").count() == 3;
-        return if released { "public, max-age=86400, stale-while-revalidate=604800" } else { "public, max-age=300, stale-while-revalidate=86400" };
+        return if docs && first.split(".").count() == 3 { PINNED } else { FRESH };
     }
-    if f.contains("/fonts/") { return "public, max-age=86400, stale-while-revalidate=2592000"; }
     let v = query_v(query);
     if !v.is_empty() && v == (try pkg::og_version(f) catch _ { "" }) { return FOREVER; }
-    if f.ends_with(".json") { "public, max-age=300" } else { "public, max-age=3600" }
+    FRESH
 }
 
 /// The `v` parameter of a query string, or "".
@@ -684,13 +686,15 @@ fn redirects() {
     assert(to("/packages", true) == "-" && to("/packages/json/0.2.0", true) == "-" && to("/packages/json", false) == "-", "package docs pages");
     assert(to("/ko/packages/json", true) == "/ko/packages/json/latest" && to("/ko/packages", true) == "-", "in the Korean chrome");
     assert(query_v("v=abc") == "abc" && query_v("x=1&v=d") == "d" && query_v("vv=1") == "", "query v");
-    assert(cache_for("out/www/nabi.css", "/nabi.css", "v=1", false) == "public, max-age=3600", "stale version");
-    assert(cache_for("out/www/og.png", "/og.png", "", false) == "public, max-age=3600", "bare og");
-    assert(cache_for("out/docs/latest/learn.html", "/latest/learn", "", true) == "public, max-age=300, stale-while-revalidate=86400", "latest");
-    assert(cache_for("out/docs/dev/learn.html", "/dev/learn", "", true) == "public, max-age=300, stale-while-revalidate=86400", "dev");
-    assert(cache_for("out/docs/0.1.2/learn.html", "/0.1.2/learn", "", true) == "public, max-age=86400, stale-while-revalidate=604800", "release");
-    assert(cache_for("out/www/download.html", "/download", "", false) == "public, max-age=300, stale-while-revalidate=86400", "home");
-    assert(cache_for("out/www/fonts/Geist-Variable.woff2", "/fonts/Geist-Variable.woff2", "", false) == "public, max-age=86400, stale-while-revalidate=2592000", "fonts");
-    assert(cache_for("out/docs/latest/search-index.json", "/latest/search-index.json", "", true) == "public, max-age=300", "index");
+    assert(cache_for("out/www/nabi.css", "/nabi.css", "v=1", false) == FRESH, "stale version");
+    assert(cache_for("out/www/og.png", "/og.png", "", false) == FRESH, "bare og");
+    assert(cache_for("out/docs/latest/learn.html", "/latest/learn", "", true) == FRESH, "latest");
+    assert(cache_for("out/docs/dev/learn.html", "/dev/learn", "", true) == FRESH, "dev");
+    assert(cache_for("out/docs/0.1.2/learn.html", "/0.1.2/learn", "", true) == PINNED, "release");
+    assert(cache_for("out/www/download.html", "/download", "", false) == FRESH, "home");
+    assert(cache_for("out/www/fonts/Geist-Variable.woff2", "/fonts/Geist-Variable.woff2", "", false) == FRESH, "fonts");
+    assert(cache_for("out/docs/latest/search-index.json", "/latest/search-index.json", "", true) == FRESH, "index");
+    assert(cache_for("out/docs/packages/json/0.2.0/read.html", "/packages/json/0.2.0/read", "", true) == PINNED && cache_for("out/docs/packages/json/latest/read.html", "/packages/json/latest/read", "", true) == FRESH, "package docs");
+    assert(cache_for("out/docs/ko/packages/json/0.2.0.html", "/ko/packages/json/0.2.0", "", true) == PINNED && cache_for("out/docs/packages/index.html", "/packages", "", true) == FRESH, "korean chrome, the list");
     assert(to("//evil.example/", false) == "/evil.example" && to("/\\evil.example/", false) == "-", "off-site");
 }
