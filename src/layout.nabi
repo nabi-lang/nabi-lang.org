@@ -956,7 +956,7 @@ pub fn www_page(site: Site, out: str, title: str, body: str) -> str {
     f"<!doctype html>
 <html class=\"nb lt\" lang=\"{lang}\">
 <head>
-{head(site, root, full, desc, url, img, pkg::headline(site), alt_head, ko)}</head>
+{head(site, root, full, desc, url, img, pkg::headline(site), if at == "index.html" { alt_head + f"<link rel=\"me\" href=\"{chrome::MASTODON}\">\n" } else { alt_head }, ko)}</head>
 <body class=\"{kind} www\" data-root=\"{root}\" data-play=\"{esc(site.playground)}\">
 <a class=\"skip\" href=\"#content\">{tr(ko, "Skip to content", "본문으로 건너뛰기")}</a>
 <header class=\"hdr top\" lang=\"{lang}\">
