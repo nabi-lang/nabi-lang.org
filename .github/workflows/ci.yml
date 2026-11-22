@@ -1,6 +1,8 @@
 # Every commit of a pull request is signed off (CONTRIBUTING.md, Sign your
-# work).
-name: CI / DCO sign-off
+# work), and the site builds and passes its checks: the generator's
+# tests, both sites built with no broken link, the pages in Chrome
+# (tests/browser.ts) and lychee over the built HTML.
+name: CI
 
 on:
   pull_request:
@@ -14,11 +16,90 @@ jobs:
     name: DCO
     uses: nabi-lang/.github/.github/workflows/reusable-dco.yml@v1.0.3
 
+  site:
+    name: Build and check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: nabi-lang.org
+    steps:
+      # This repository and the content it builds, side by side as the
+      # README lays them out.
+      - uses: actions/checkout@v4
+        with:
+          path: nabi-lang.org
+          submodules: true
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with: { repository: nabi-lang/docs, path: docs, persist-credentials: false }
+      - uses: actions/checkout@v4
+        with: { repository: nabi-lang/www, path: www, persist-credentials: false }
+      - uses: actions/checkout@v4
+        with: { repository: nabi-lang/spec, path: spec, persist-credentials: false }
+      - uses: actions/checkout@v4
+        with: { repository: nabi-lang/markdown, path: markdown, persist-credentials: false }
+      - uses: actions/checkout@v4
+        with: { repository: nabi-lang/nabi-syntax, path: nabi-syntax, persist-credentials: false }
+      # The standard library, CHANGELOG.md and the installers only.
+      - uses: actions/checkout@v4
+        with:
+          repository: nabi-lang/nabi
+          path: nabi
+          persist-credentials: false
+          sparse-checkout: |
+            library
+            CHANGELOG.md
+            install.sh
+            install.ps1
+          sparse-checkout-cone-mode: false
+      - name: Install the toolchain
+        run: |
+          curl -fsSL https://nabi.sh | sh
+          echo "$HOME/.nabi/bin" >> "$GITHUB_PATH"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: nabi-lang.org/package-lock.json
+      - name: Page scripts
+        run: |
+          npm ci
+          npm run build
+          npm run check
+      - name: Tests
+        run: nabi test
+      - name: Build
+        run: |
+          nabi run -- pkgdocs-sync "$RUNNER_TEMP/pkgdocs" https://packages.nabi-lang.org
+          NABI_PKG_DOCS="$RUNNER_TEMP/pkgdocs" nabi run | tee "$RUNNER_TEMP/build.log"
+          grep -q ' 0 broken links' "$RUNNER_TEMP/build.log"
+      - uses: browser-actions/setup-chrome@v1
+        id: chrome
+      - name: Pages in Chrome
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+        run: npm run browser
+      # Root-relative links resolve under each site's own directory; the
+      # canonical addresses have no .html.
+      - name: Links, nabi-lang.org
+        uses: lycheeverse/lychee-action@v2
+        with:
+          workingDirectory: nabi-lang.org
+          fail: true
+          args: --config lychee.toml --root-dir ${{ github.workspace }}/nabi-lang.org/public/www public/www
+      - name: Links, docs.nabi-lang.org
+        uses: lycheeverse/lychee-action@v2
+        with:
+          workingDirectory: nabi-lang.org
+          fail: true
+          args: --config lychee.toml --root-dir ${{ github.workspace }}/nabi-lang.org/public/docs public/docs/dev public/docs/packages
+
   # The one required check (rulesets/main.json): passes when every job
   # passed or was skipped.
   ci-gate:
     name: CI gate
-    needs: [dco]
+    needs: [dco, site]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

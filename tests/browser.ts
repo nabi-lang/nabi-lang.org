@@ -1,13 +1,22 @@
 // Browser checks of a built site: every page given loads without a
 // script error or a missing file, passes the accessibility checks below
 // in light and dark, at desktop and phone width, and the docs search
-// finds a phrase that only the body text has. Serves public/ itself.
+// finds a phrase that only the body text has. Then the WCAG 2.2 checks
+// that need a reader's moves: focus is never under the sticky header
+// (2.4.11), the header menus close on Escape and give the focus back to
+// their button; and the search palette and the docs search's Packages
+// group. Serves public/ itself, and answers for docs.nabi-lang.org (its
+// latest/ from --version) and the registry's package list, so nothing
+// leaves the machine. It ends with the bytes, gzipped, the first search
+// of the docs reads.
 //
-// usage: node tests/browser.ts [--shots <dir>] [--version dev] [page..]
-//   page: `www:<path>` or `docs:<path>` (e.g. `docs:learn/science/`);
-//   without any, a representative set.
+// usage: node tests/browser.ts [--shots <dir>] [--version dev] [--out public] [page..]
+//   page: `www:<path>`, `docs:<path>` (in the version, e.g.
+//   `docs:learn/rosetta/`) or `pkg:<path>` (under /packages/); without
+//   any, a representative set.
 // Needs Chrome (CHROME_PATH, or the usual install paths).
-import puppeteer, { type Browser, type Page } from "puppeteer-core";
+import puppeteer, { type Browser, type HTTPRequest, type Page } from "puppeteer-core";
+import { gzipSync } from "node:zlib";
 import { createServer, type Server } from "node:http";
 import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { extname, join, normalize } from "node:path";
@@ -27,9 +36,10 @@ const out = opt("--out") ?? "public";
 
 const DEFAULT = [
   "www:", "www:download", "www:roadmap", "www:faq", "www:news/", "www:news/nabi-0.1.0", "www:ko/", "www:ko/download", "www:ko/roadmap", "www:ko/faq", "www:ko/news/nabi-0.1.0",
-  "docs:", "docs:learn/", "docs:learn/05-sum-types", "docs:learn/science/", "docs:learn/science/01-data-analysis",
-  "docs:learn/rosetta/", "docs:learn/rosetta/strings", "docs:ko/learn/science/", "docs:ko/learn/rosetta/numbers",
-  "docs:std/core/collections/list", "docs:errors/",
+  "www:community", "www:governance", "www:brand", "www:releases/", "www:releases/0.1.1", "www:ko/community", "www:ko/brand", "www:ko/releases/",
+  "docs:", "docs:learn/", "docs:learn/05-sum-types", "docs:learn/22-science", "docs:ko/learn/22-science",
+  "docs:learn/rosetta/", "docs:learn/rosetta/strings", "docs:ko/learn/rosetta/numbers",
+  "docs:std/core/collections/list", "docs:errors/", "pkg:", "pkg:json/latest", "pkg:table/latest/column",
 ];
 const pages = args.length ? args : DEFAULT;
 
@@ -39,23 +49,49 @@ const TYPES: Record<string, string> = {
   ".txt": "text/plain", ".xml": "application/xml", ".ico": "image/x-icon",
 };
 
-// A file server over `root` that resolves canonical addresses as
-// `serve` does: <path>, <path>.html, <path>/index.html.
+// The file under `root` a canonical address names, as `serve` resolves
+// it: <path>, <path>.html, <path>/index.html.
+function file(root: string, path: string): string | null {
+  const base = normalize(join(root, path));
+  if (!base.startsWith(normalize(root))) return null;
+  for (const f of [base, base + ".html", join(base, "index.html")]) if (existsSync(f) && statSync(f).isFile()) return f;
+  return null;
+}
+
 function serve(root: string): Promise<Server> {
   const s = createServer((req, res) => {
-    const path = decodeURIComponent(new URL(req.url ?? "/", "http://x").pathname);
-    const base = normalize(join(root, path));
-    if (!base.startsWith(normalize(root))) { res.writeHead(403).end(); return; }
-    for (const f of [base, base + ".html", join(base, "index.html")]) {
-      if (existsSync(f) && statSync(f).isFile()) {
-        res.writeHead(200, { "Content-Type": TYPES[extname(f)] ?? "application/octet-stream" });
-        res.end(readFileSync(f));
-        return;
-      }
+    const f = file(root, decodeURIComponent(new URL(req.url ?? "/", "http://x").pathname));
+    if (f) {
+      res.writeHead(200, { "Content-Type": TYPES[extname(f)] ?? "application/octet-stream" });
+      res.end(readFileSync(f));
+      return;
     }
     res.writeHead(404, { "Content-Type": "text/html" }).end("not found");
   });
   return new Promise((ok) => s.listen(0, "127.0.0.1", () => ok(s)));
+}
+
+// What the pages ask of the other hosts: docs.nabi-lang.org from out/docs
+// (latest/ is --version), and the registry's package list made from the
+// package docs' list. Anything else off the machine is refused.
+const DOCS_HOST = "https://docs.nabi-lang.org";
+const REGISTRY = "https://packages.nabi-lang.org";
+function registryList(): string {
+  const f = join(out, "docs", "packages", "search-index.json");
+  const p = existsSync(f) ? (JSON.parse(readFileSync(f, "utf8")) as { p: [string, string, string?][] }).p : [];
+  return JSON.stringify(p.map(([name, , description]) => ({ name, description: description ?? "", official: true, versions: [] })));
+}
+async function answer(req: HTTPRequest): Promise<void> {
+  const u = new URL(req.url());
+  const cors = { "Access-Control-Allow-Origin": "*" };
+  if (u.origin === DOCS_HOST) {
+    const f = file(join(out, "docs"), decodeURIComponent(u.pathname).replace(/^\/latest(\/|$)/, `/${version}$1`));
+    if (f) return req.respond({ status: 200, contentType: TYPES[extname(f)] ?? "application/octet-stream", headers: cors, body: readFileSync(f) });
+    return req.respond({ status: 404, headers: cors, body: "not found" });
+  }
+  if (u.origin === REGISTRY && u.pathname === "/api/v1/docs") return req.respond({ status: 200, contentType: "application/json", headers: cors, body: registryList() });
+  if (u.hostname === "127.0.0.1" || u.protocol === "data:") return req.continue();
+  return req.abort("blockedbyclient");
 }
 
 function chrome(): string {
@@ -161,11 +197,11 @@ function audit(phone: boolean): string[] {
   }
   if (low > 5) bad.push(`... and ${low - 5} more low-contrast texts`);
   // Target size (WCAG 2.5.8, 24 x 24 px) of controls that are not links
-  // inside running text.
-  if (phone) {
+  // inside running text, at either width.
+  {
     let small = 0;
-    for (const el of document.querySelectorAll("a[href], button")) {
-      if (!shown(el) || getComputedStyle(el).display === "inline") continue;
+    for (const el of document.querySelectorAll("a[href], button, summary, input:not([type=hidden])")) {
+      if (!shown(el) || getComputedStyle(el).display === "inline" || el.closest("p, li, td, th, dd, figcaption") && getComputedStyle(el).display.startsWith("inline")) continue;
       const r = el.getBoundingClientRect();
       if (r.width < 24 || r.height < 24) { if (small++ < 5) bad.push(`target ${r.width.toFixed(0)}x${r.height.toFixed(0)} px: ${where(el)} "${name(el).slice(0, 30)}"`); }
     }
@@ -182,13 +218,120 @@ async function open(browser: Browser, url: string, dark: boolean, phone: boolean
   await page.evaluateOnNewDocument((t: string) => { try { localStorage.setItem("theme", t); } catch {} }, dark ? "dark" : "light");
   page.on("pageerror", (e) => errors.push(`script error: ${e instanceof Error ? e.message : String(e)}`));
   page.on("console", (m) => { if (m.type() === "error") errors.push(`console: ${m.text()}`); });
-  page.on("response", (r) => { if (r.status() >= 400 && r.url().startsWith("http://127.0.0.1")) errors.push(`${r.status()} ${new URL(r.url()).pathname}`); });
+  page.on("response", (r) => { if (r.status() >= 400 && /^http:\/\/127\.0\.0\.1|^https:\/\/docs\.nabi-lang\.org/.test(r.url())) errors.push(`${r.status()} ${r.url().replace(/^https?:\/\/[^/]+/, "")}`); });
+  await page.setRequestInterception(true);
+  page.on("request", (r) => { answer(r).catch(() => {}); });
   await page.goto(url, { waitUntil: "networkidle0" });
   await page.evaluate(async () => { await document.fonts.ready; });
   return page;
 }
 
 const slug = (p: string): string => p.replace(/[:/]+/g, "-").replace(/-$/, "") || "home";
+
+// One check: ok, or each problem found.
+function report(tag: string, errors: string[]): number {
+  if (errors.length) { console.log(`FAIL ${tag}\n  ${errors.join("\n  ")}`); return 1; }
+  console.log(`ok   ${tag}`);
+  return 0;
+}
+
+// The checks that need a reader's moves, at desktop width and in light.
+async function interactions(browser: Browser, www: string, docs: string): Promise<number> {
+  let failed = 0;
+  const v = `${docs}/${version}`;
+  // 2.4.11: scrolled to the end, focus on the first link of the page's
+  // text, which the browser scrolls back into view: not under the header.
+  for (const url of [`${v}/learn/05-sum-types`, `${www}/faq`]) {
+    const errors: string[] = [];
+    const page = await open(browser, url, false, false, errors);
+    const r = await page.evaluate(() => {
+      scrollTo(0, document.scrollingElement!.scrollHeight);
+      const a = document.querySelector<HTMLElement>("main article a[href]:not(.anchor)");
+      if (!a) return null;
+      a.focus();
+      const hdr = document.querySelector(".hdr")!.getBoundingClientRect();
+      return { top: a.getBoundingClientRect().top, under: hdr.bottom };
+    });
+    if (!r) errors.push("no link in the article");
+    else if (r.top < r.under) errors.push(`focused link at ${r.top.toFixed(0)}px, under the header (to ${r.under.toFixed(0)}px)`);
+    failed += report(`focus not obscured ${url.replace(/^http:\/\/[^/]+/, "")}`, errors);
+    await page.close();
+  }
+  // The header menus: open, Escape, closed with the focus on the summary.
+  for (const [url, sel] of [[`${v}/learn/`, "details.vers"], [`${v}/learn/`, "details.lang-menu"], [`${www}/download`, "details.lang-menu"]] as const) {
+    const errors: string[] = [];
+    const page = await open(browser, url, false, false, errors);
+    await page.click(`${sel} > summary`);
+    const opened = await page.$eval(sel, (d) => (d as HTMLDetailsElement).open);
+    if (!opened) errors.push("did not open");
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Escape");
+    const after = await page.$eval(sel, (d) => ({ open: (d as HTMLDetailsElement).open, back: document.activeElement === d.querySelector("summary") }));
+    if (after.open) errors.push("still open after Escape");
+    if (!after.back) errors.push("focus not back on its summary");
+    failed += report(`menu ${sel} closes on Escape ${url.replace(/^http:\/\/[^/]+/, "")}`, errors);
+    await page.close();
+  }
+  // The search palette: Ctrl+K, groups for a name, Escape back.
+  for (const [url, q, want] of [[`${www}/`, "list", ["Std"]], [`${www}/ko/`, "json", ["패키지"]], [`${v}/learn/`, "json", ["Packages"]], [`${v}/learn/`, "sum types", ["Docs"]], [`${v}/learn/`, "sudoku", ["Examples"]]] as const) {
+    const errors: string[] = [];
+    const page = await open(browser, url, false, false, errors);
+    await page.keyboard.down("Control");
+    await page.keyboard.press("k");
+    await page.keyboard.up("Control");
+    const opened = await page.waitForFunction(() => document.activeElement?.id === "pal-q", { timeout: 4000 }).then(() => true, () => false);
+    if (!opened) errors.push("Ctrl+K did not open the palette");
+    else {
+      await page.keyboard.type(q, { delay: 20 });
+      await page.waitForFunction((w: readonly string[]) => w.every((g) => [...document.querySelectorAll(".pal-g")].some((e) => e.textContent === g)), { timeout: 8000 }, want)
+        .catch(() => errors.push(`"${q}": no ${want.join(", ")} group (got ${"..."})`));
+      const groups = await page.$$eval(".pal-g", (es) => es.map((e) => e.textContent));
+      if (errors.length) errors.push(`groups: ${groups.join(", ")}`);
+      const sel = await page.$eval("#pal-q", (i) => i.getAttribute("aria-activedescendant"));
+      if (!sel) errors.push("no option active");
+      errors.push(...(await page.evaluate(audit, false)).filter((e) => !/<h1>/.test(e)));
+      await page.keyboard.press("Escape");
+      const shut = await page.evaluate(() => !document.querySelector<HTMLDialogElement>("dialog.pal")!.open);
+      if (!shut) errors.push("Escape did not close it");
+    }
+    failed += report(`palette "${q}" ${url.replace(/^http:\/\/[^/]+/, "")}`, errors);
+    if (shots) await page.screenshot({ path: `${shots}/palette-${slug(url.replace(/^http:\/\/[^/]+\//, "") + q)}.png` });
+    await page.close();
+  }
+  // The docs search: a Packages group under the hits.
+  {
+    const errors: string[] = [];
+    const page = await open(browser, `${v}/learn/`, false, false, errors);
+    await page.focus("#q");
+    await page.keyboard.type("parse", { delay: 20 });
+    await page.waitForFunction(() => document.querySelectorAll("#results .grp-pkgs a[role=option]").length > 0, { timeout: 8000 }).catch(() => errors.push("no Packages group"));
+    const hrefs = await page.$$eval("#results .grp-pkgs a", (as) => as.map((a) => a.getAttribute("href") ?? ""));
+    if (hrefs.length && !hrefs.every((h) => h.startsWith("/packages/") || h.startsWith(REGISTRY))) errors.push(`package hits go elsewhere: ${hrefs.join(", ")}`);
+    failed += report("docs search Packages group", errors);
+    await page.close();
+  }
+  // What the first search reads, gzipped: a fresh page, one query.
+  for (const [lang, q] of [["", "towers hanoi"], ["ko/", "하노이"]] as const) {
+    const page = await open(browser, `${v}/${lang}learn/`, false, false, []);
+    const got: string[] = [];
+    page.on("requestfinished", (r) => { if (/search-|search-api|api\/v1\/docs/.test(r.url())) got.push(r.url()); });
+    await page.focus("#q");
+    await page.keyboard.type(q, { delay: 20 });
+    await page.waitForNetworkIdle({ idleTime: 500 });
+    let total = 0;
+    const parts: string[] = [];
+    for (const u of got) {
+      const path = new URL(u).pathname;
+      const f = file(join(out, "docs"), path);
+      const n = f ? gzipSync(readFileSync(f), { level: 9 }).length : 0;
+      total += n;
+      parts.push(`${path.replace(`/${version}/`, "")} ${(n / 1024).toFixed(1)}`);
+    }
+    console.log(`info first search ${lang}"${q}": ${(total / 1024).toFixed(1)} KiB gzipped (${parts.join(", ")})`);
+    await page.close();
+  }
+  return failed;
+}
 
 async function main(): Promise<void> {
   const www = await serve(join(out, "www"));
@@ -199,7 +342,7 @@ async function main(): Promise<void> {
   let failed = 0;
   try {
     for (const p of pages) {
-      const [site, path] = p.startsWith("www:") ? [at(www), p.slice(4)] : [at(docs) + "/" + version, p.replace(/^docs:/, "")];
+      const [site, path] = p.startsWith("www:") ? [at(www), p.slice(4)] : p.startsWith("pkg:") ? [at(docs) + "/packages", p.slice(4)] : [at(docs) + "/" + version, p.replace(/^docs:/, "")];
       const url = `${site}/${path}`;
       for (const dark of [false, true]) {
         for (const phone of [false, true]) {
@@ -215,7 +358,7 @@ async function main(): Promise<void> {
       }
     }
     // Search: a phrase only body text has.
-    for (const [lang, q, want] of [["", "towers hanoi", "rosetta/algorithms"], ["", "bootstrap resamples", "science/03-statistics"], ["ko/", "하노이", "rosetta/algorithms"]] as const) {
+    for (const [lang, q, want] of [["", "towers hanoi", "rosetta/algorithms"], ["", "quaternions symplectic", "learn/22-science"], ["ko/", "하노이", "rosetta/algorithms"]] as const) {
       for (const dark of [false, true]) {
         for (const phone of [false, true]) {
           const errors: string[] = [];
@@ -233,6 +376,7 @@ async function main(): Promise<void> {
         }
       }
     }
+    failed += await interactions(browser, at(www), at(docs));
   } finally {
     await browser.close();
     www.close();

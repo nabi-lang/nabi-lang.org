@@ -1,0 +1,22 @@
+# lychee over the built pages (CI). The generator checks every internal
+# link itself; this adds the anchors and the links that leave the sites.
+
+include_fragments = true
+fallback_extensions = ["html"]
+index_files = ["index.html"]
+max_concurrency = 16
+max_retries = 2
+timeout = 20
+# Rate limits are not broken links.
+accept = ["200..=299", "403", "429"]
+exclude = [
+    # Cloudflare's email address obfuscation is on for the live hosts:
+    # it rewrites mailto: links into these, which work only in a browser.
+    '/cdn-cgi/l/email-protection',
+    '/cdn-cgi/scripts/',
+    '^mailto:',
+    # Other docs versions: a CI build makes dev/ only.
+    '^file://.*/public/docs/(latest|\d+\.\d+(\.\d+)?)(/|$)',
+    # Edit links to files a pull request may add.
+    '^https://github\.com/nabi-lang/[^/]+/edit/',
+]
