@@ -101,6 +101,10 @@ pub struct Site {
     /// index.nabion and <name>/<version>.nabion; `""` builds none.
     /// $NABI_PKG_DOCS overrides it (the server's builds).
     pub pkg_docs: str = "";
+    /// Where /install.sh and /install.ps1 come from: the newest release's
+    /// nabi checkout (serve), never main, whose release commit lands
+    /// before the archives are out. `""`: beside `library` (local builds).
+    pub installers: str = "";
     pub out: str = "public";
     /// The release this build documents (`0.1.2`), and the earlier
     /// releases of its version, oldest first: what the API's "Added in"

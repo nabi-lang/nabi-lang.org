@@ -232,6 +232,16 @@ fn release_rank(v: str) -> i64 {
     if n == 3 { r } else { -1 }
 }
 
+/// The site.nabion line that takes the installers from the newest
+/// release's checkout (`rel`, newest first; synced above), never from
+/// main: a release commit lands on main before its archives are out, and
+/// nabi.sh would offer a version not yet published. `""` before the
+/// first release.
+fn installers_line(cfg: Cfg, rel: List<str>) -> str {
+    if rel.is_empty() { return ""; }
+    f"    installers: \"{cfg.data}/src/nabi/v{rel[0]}\",\n"
+}
+
 /// "0.1.4" -> "0.1".
 fn minor_of(v: str) -> str { before_last(v, ".") ?? v }
 
@@ -318,7 +328,7 @@ fn round(cfg: Cfg, exe: str, build: str) throws {
     let next = cfg.data + "/out.next";
     if fs::exists(next) { try fs::remove_dir_all(next); }
     let local = cfg.data + "/site.dev.nabion";
-    try fs::write(local, site_local(cfg, "main", "main", "main", f"    out: \"{next}\",\n"));
+    try fs::write(local, site_local(cfg, "main", "main", "main", f"    out: \"{next}\",\n{installers_line(cfg, rel)}"));
     try run_self(exe, [], [("NABI_SITE_LOCAL", local), ("NABI_VERSIONS", versions), ("NABI_DOCS_ARCHIVE", archive), ("NABI_PKG_DOCS", pkg_docs)]);
     let old = cfg.data + "/out.old";
     if fs::exists(old) { try fs::remove_dir_all(old); }
@@ -642,6 +652,14 @@ fn signatures_and_versions() {
     assert(release_rank("0.1") == -1 && release_rank("0.1.x") == -1 && release_rank("v0.1.0") == -1, "not a release");
     let e = parse_env("# c\nA=1\nexport B = \"x y\"\n");
     assert(e["A"] == "1" && e["B"] == "x y", "env");
+}
+
+#[test]
+fn installers_from_the_newest_release() {
+    let cfg = Cfg { addr: "", data: "/d", content: "", nabi_git: "", reload_key: "", docs_host: "", typst: "", og_fonts: "", packages: "" };
+    assert(installers_line(cfg, ["0.1.1", "0.1.0"]) == "    installers: \"/d/src/nabi/v0.1.1\",\n", installers_line(cfg, ["0.1.1", "0.1.0"]));
+    assert(installers_line(cfg, List::new()).is_empty(), "none before a release");
+    assert(!installers_line(cfg, ["0.1.1"]).contains("/main"), "never main");
 }
 
 #[test]
