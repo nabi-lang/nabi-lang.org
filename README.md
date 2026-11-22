@@ -6,12 +6,30 @@
 
 The generator for the two Nabi websites, written in Nabi. The pages themselves live in their own repositories:
 
-- nabi-lang.org: the landing page (`src/home.nabi`), the download, roadmap, FAQ, community, governance and brand pages and the news posts (`news/`) from [nabi-lang/www](https://github.com/nabi-lang/www), their Korean editions under `/ko/` (from its `ko/`), the release notes (`/releases/<version>`, one page per section of the toolchain's `CHANGELOG.md`, and `/releases`, all of them), the brand files (`/brand/`, from the web kit) and the installers (`/install.sh`, `/install.ps1`), built into `public/www/`.
+- nabi-lang.org: the landing page (`src/home.nabi`), the download, roadmap, FAQ, community, governance and brand pages and the news posts (`news/`) from [nabi-lang/www](https://github.com/nabi-lang/www), their Korean, Simplified Chinese and Traditional Chinese editions under `/ko/`, `/zh-hans/` and `/zh-hant/` (from its `ko/`, `zh-hans/`, `zh-hant/`), the release notes (`/releases/<version>`, one page per section of the toolchain's `CHANGELOG.md`, and `/releases`, all of them), the brand files (`/brand/`, from the web kit) and the installers (`/install.sh`, `/install.ps1`), built into `public/www/`.
 - docs.nabi-lang.org: the docs, one directory per version (`/0.1/`, `/dev/`, `/latest/`), built into `public/docs/<version>/`.
 
-The docs combine the guide, examples and error codes from [nabi-lang/docs](https://github.com/nabi-lang/docs), the spec (English `spec/en`, Korean `spec/ko`) and the standard library API extracted from `nabi/library`. Released versions are the `vX.Y.Z` branches of docs and spec.
+The docs combine the guide, examples and error codes from [nabi-lang/docs](https://github.com/nabi-lang/docs), the spec (English `spec/en`, Korean `spec/ko`, Chinese `spec/zh-hans` and `spec/zh-hant`) and the standard library API extracted from `nabi/library`. Released versions are the `vX.Y.Z` branches of docs and spec.
 
-Every docs page is in English and Korean: `/<version>/<path>` and `/<version>/ko/<path>`, with a language switch on each page and hreflang links between the two. The Korean pages are `ko/` in nabi-lang/docs and `spec/ko`; a page not translated yet serves its English text under a note, with `noindex`, and stays out of the sitemap. The API reference comes from the library's English doc comments: `/<version>/ko/std/` shows the same English text in Korean chrome, under a note, with `noindex` and its canonical address on the English page. Each language has its own search files and 404 page, in three parts so that a search reads only what it needs. `search-index.json` (`ko/search-index.json`) holds the titles, the `##` / `###` headings and the API's items, with no excerpts, and is read when the field takes focus. `search-text/<shard>.json` holds the words of every page's body text and of each API item's summary, each with the entries it appears in, one file per first letter (`a`..`z`, `0` for digits, `k0`..`k18` for Hangul by initial consonant, `other`); a query of three letters or more reads the files of its words. `search-x/<k>.json` holds the excerpts, 256 entries a file, read for the first hits shown once typing pauses. A query matches names and headings first, then the body text (every word of the query, as a prefix; a word of five letters or more with no match also takes words one edit away that start with the same letter). Under the hits, a Packages group: the registry's packages (`GET /api/v1/docs?format=json`) and every package's API (`/packages/search-api.json`, the newest version of each, names only), read with the first query of three letters. `search::split` makes the three parts from the indexes a build or an archive holds, so archived versions are served the same way. The first search for "towers hanoi" reads 172 KiB gzipped (it read 515 KiB when the excerpts and the whole text index came at once), "하노이" 180 KiB (725 KiB); `npm run browser` prints the figures.
+## Languages
+
+Every page is in English, Korean, Simplified Chinese and Traditional Chinese (Taiwan usage): `/<version>/<path>`, `/<version>/ko/<path>`, `/<version>/zh-hans/<path>`, `/<version>/zh-hant/<path>` on the docs, `/<path>`, `/ko/<path>`, `/zh-hans/<path>`, `/zh-hant/<path>` on nabi-lang.org, `/<lang>/packages/..` for the package docs. The languages and the kit's words are the web kit's `web::lang`; this site's own words are `layout::tr(l, en, ko, hans, hant)` calls, and `static/search.tsx`'s `STRINGS`. Each page has a language menu with all four, each the same page in that language (on the docs, the reader's section carried over), and hreflang links (`en`, `ko`, `zh-Hans`, `zh-Hant`, `x-default`) between the editions written in their language.
+
+Translations live in the content repositories, mirroring the English files exactly (same names, same directories):
+
+| English | Korean | Simplified Chinese | Traditional Chinese |
+|---------|--------|--------------------|---------------------|
+| docs `learn/05-sum-types.md` | docs `ko/learn/05-sum-types.md` | docs `zh-hans/learn/05-sum-types.md` | docs `zh-hant/learn/05-sum-types.md` |
+| spec `en/refs-lang/README.md` | spec `ko/refs-lang/README.md` | spec `zh-hans/refs-lang/README.md` | spec `zh-hant/refs-lang/README.md` |
+| www `download.md`, `news/nabi-0.1.0.md` | www `ko/download.md` .. | www `zh-hans/download.md` .. | www `zh-hant/download.md` .. |
+
+A file needs nothing but the translated Markdown: no front matter. Its `# ` title is the page's title, a news post keeps its `<!-- date: YYYY-MM-DD -->` line, and links stay relative as in English (`docs:` and `play:` links too). Heading ids come from the translated headings, so a link to a section of a translated page uses the translated heading's id (`download.html#压缩包`); the language menu carries a reader's section over by position. A file without an English page is not built (the build says so); docs `i18n/` is not a page. Spec editions are the directories beside `spec` (`spec_ko`, `spec_zh_hans`, `spec_zh_hant` in `site.nabion` override them).
+
+A page not translated yet serves its English text under a note in the language (`本页尚未翻译，以下为英文原文。`), with `noindex`, no hreflang links, and stays out of the sitemap. The API reference comes from the library's English doc comments: `/<version>/<lang>/std/` shows the same English text in that language's chrome, under a note, with `noindex` and its canonical address on the English page; the package docs likewise. Release notes are English: the other languages show them under a note, with `noindex`.
+
+## Search
+
+Each language has its own search files and 404 page, in three parts so that a search reads only what it needs. `search-index.json` (`ko/search-index.json`, `zh-hans/search-index.json` ..) holds the titles, the `##` / `###` headings and the API's items, with no excerpts, and is read when the field takes focus. `search-text/<shard>.json` holds the words of every page's body text and of each API item's summary, each with the entries it appears in, one file per first letter (`a`..`z`, `0` for digits, `k0`..`k18` for Hangul by initial consonant, `h0`..`h15` for Han by code point, `other`); a query of three letters or more (one Han character, two Hangul syllables) reads the files of its words. Chinese has no spaces, so Han text is indexed as every pair of characters side by side (and each run's last character alone), however common; a query's Han run is cut the same way and every pair has to be found, a single character matches as a prefix. `search-x/<k>.json` holds the excerpts, 256 entries a file, read for the first hits shown once typing pauses. A query matches names and headings first, then the body text (every word of the query, as a prefix; a word of five letters or more with no match also takes words one edit away that start with the same letter). Under the hits, a Packages group: the registry's packages (`GET /api/v1/docs?format=json`) and every package's API (`/packages/search-api.json`, the newest version of each, names only), read with the first query of three letters. `search::split` makes the three parts from the indexes a build or an archive holds, so archived versions are served the same way. The first search for "towers hanoi" reads 172 KiB gzipped (it read 515 KiB when the excerpts and the whole text index came at once), "하노이" 180 KiB (725 KiB); `npm run browser` prints the figures.
 
 Every page loads the web kit's search palette (`palette.js`): Cmd+K or Ctrl+K, or the header's search button on nabi-lang.org, opens one field over the docs (of the version shown; of `latest/` from nabi-lang.org), the standard library, the packages and the examples, its results grouped Docs / Std / Packages / Examples. The docs host answers its JSON files with `Access-Control-Allow-Origin: *` for it, and the pages' CSP lets them reach docs.nabi-lang.org and packages.nabi-lang.org.
 
@@ -26,11 +44,11 @@ Needs the Nabi toolchain (`nabi`, `nabic`), the [web kit](https://github.com/nab
 |-- docs/               # guide, examples
 |-- www/                # home, download, roadmap
 |-- nabi/               # toolchain; nabi/library is the standard library
-|-- spec/               # spec/en/ + spec/ko/
+|-- spec/               # spec/en/, spec/ko/, spec/zh-hans/, spec/zh-hant/
 `-- nabi-lang.org/      # this repository
 ```
 
-If checkouts live elsewhere, point `docs`, `www`, `spec`, `spec_ko`, and `library` at them in `site.local.nabion` (git-ignored; overrides `site.nabion`). No toolchain? Install one (`curl -fsSL https://nabi.sh | sh`) or `cargo build --release` in `../nabi`.
+If checkouts live elsewhere, point `docs`, `www`, `spec`, `spec_ko` (and `spec_zh_hans`, `spec_zh_hant`), and `library` at them in `site.local.nabion` (git-ignored; overrides `site.nabion`). No toolchain? Install one (`curl -fsSL https://nabi.sh | sh`) or `cargo build --release` in `../nabi`.
 
 ```bash
 nabi run                      # build public/www/ and the dev docs
@@ -44,7 +62,7 @@ npm run browser -- --shots shots   # the built pages in Chrome (below)
 
 Code blocks that use an official package (`table::read_csv(..)`, `use stats::Normal;`) get it added on first use, as for any user. Before the packages are on the registry, point `NABI_PACKAGES` at a directory of their checkouts (`NABI_PACKAGES=~/src nabi run -- check`): each such block then runs with path dependencies on them.
 
-`npm run browser` serves `public/` itself and opens a representative set of pages (or the ones given, `www:ko/`, `docs:learn/rosetta/` or `pkg:json/latest`) in headless Chrome, in light and dark and at desktop and phone width. It answers for docs.nabi-lang.org from `public/docs` (its `latest/` from `--version`) and for the registry's package list, and refuses every other address off the machine. It fails on a script error, a missing file, a page that scrolls sideways on a phone, and on accessibility problems: no `lang`, a heading level skipped, duplicate ids, an image, button or link without a name, a control inside `role="img"`, a form field without a label, text below the WCAG AA contrast ratio, a control smaller than 24 x 24 px (WCAG 2.2, 2.5.8). It also checks that the docs search finds phrases that only body text has and shows a Packages group, that a focused link is never under the sticky header (2.4.11), that the version and language menus close on Escape and give the focus back to their button, and that the search palette opens on Ctrl+K with its groups and closes on Escape; then it prints what the first search reads. `--shots <dir>` saves a screenshot of each.
+`npm run browser` serves `public/` itself and opens a representative set of pages in every language (or the ones given, `www:ko/`, `docs:learn/rosetta/`, `pkg:json/latest` or `host:zh-hans/packages/`) in headless Chrome, in light and dark and at desktop and phone width. It answers for docs.nabi-lang.org from `public/docs` (its `latest/` from `--version`) and for the registry's package list, and refuses every other address off the machine. It fails on a script error, a missing file, a page that scrolls sideways on a phone, and on accessibility problems: no `lang`, a heading level skipped, duplicate ids, an image, button or link without a name, a control inside `role="img"`, a form field without a label, text below the WCAG AA contrast ratio, a control smaller than 24 x 24 px (WCAG 2.2, 2.5.8). It also checks that the docs search finds phrases that only body text has (in Chinese too, once the docs have `learn/rosetta/algorithms` in it) and shows a Packages group, that the language menu lists all four languages with the same page in each and that Chinese text gets its CJK faces, that a focused link is never under the sticky header (2.4.11), that the version and language menus close on Escape and give the focus back to their button, and that the search palette opens on Ctrl+K with its groups and closes on Escape; then it prints what the first search reads. `--shots <dir>` saves a screenshot of each.
 
 Generation takes 1-5 seconds; `check` compiles and runs hundreds of code blocks and takes 1-3 minutes. The ` ```nabi ` block check rules (`build`, `norun`, `output`) are the web kit's `tools/snippets`.
 
@@ -54,7 +72,7 @@ The page scripts are TypeScript and TSX: each file directly in `static/` is a pa
 
 ## Web kit
 
-`web/` is [nabi-lang/web](https://github.com/nabi-lang/web), pinned to a commit. The generator builds its `web` library in (`Dep::path("web/nabi")`): HTTP and the canonical-address rules (`web::url`), the theme controls, social links and footer (`web::chrome`), the library scanner behind the API pages and their navigation (`web::apidoc`, `web::apidoc::nav`), and the kit's files, which every build writes beside `static/` into `public/www/` and each docs version directory: `nabi.css`, `theme.js`, `keys.js`, `copy.js`, `palette.js`, `logo.svg`, the icons and `site.webmanifest`, plus the webfonts, copied from `web/assets/fonts` to `fonts/` (Geist, Geist Mono, Pretendard; Korean pages load Pretendard's stylesheet), and on nabi-lang.org the brand files, copied from `web/assets/brand/download` to `brand/`. The fonts are files, not built in, so `serve` needs `web/assets/fonts` beside `site.nabion` and `static/` at run time. Move to a newer kit with:
+`web/` is [nabi-lang/web](https://github.com/nabi-lang/web), pinned to a commit. The generator builds its `web` library in (`Dep::path("web/nabi")`): HTTP and the canonical-address rules (`web::url`), the theme controls, social links and footer (`web::chrome`), the library scanner behind the API pages and their navigation (`web::apidoc`, `web::apidoc::nav`), and the kit's files, which every build writes beside `static/` into `public/www/` and each docs version directory: `nabi.css`, `theme.js`, `keys.js`, `copy.js`, `palette.js`, `logo.svg`, the icons and `site.webmanifest`, plus the webfonts, copied from `web/assets/fonts` to `fonts/` (Geist, Geist Mono, Pretendard; Korean pages load Pretendard's stylesheet, Chinese pages use the system's CJK faces), and on nabi-lang.org the brand files, copied from `web/assets/brand/download` to `brand/`. The fonts are files, not built in, so `serve` needs `web/assets/fonts` beside `site.nabion` and `static/` at run time. Move to a newer kit with:
 
 ```bash
 git submodule update --remote web
@@ -87,21 +105,21 @@ The packages' API docs are on the docs site, as docs.rs does for crates.io: `/pa
 
 ## Configuration
 
-Edit `site.nabion` (NABION); `site.local.nabion` overrides its fields. Key fields: `title`, `tagline`, `description`, `base_url`, `docs_url`, `docs`, `www`, `spec` / `spec_ko`, `packages`, `library`, `out`. `versions.nabion` lists released docs versions, newest first, for local builds; the server works them out from the branches.
+Edit `site.nabion` (NABION); `site.local.nabion` overrides its fields. Key fields: `title`, `tagline`, `description`, `base_url`, `docs_url`, `docs`, `www`, `spec` / `spec_ko` / `spec_zh_hans` / `spec_zh_hant`, `packages`, `library`, `out`. `versions.nabion` lists released docs versions, newest first, for local builds; the server works them out from the branches.
 
 ## Layout
 
 | File | Contents |
 |------|----------|
 | `src/main.nabi`   | Config and arguments; runs the build: fragments of every page, then each output directory |
-| `src/spec.nabi`   | Spec pages (English and Korean): sources, links, breadcrumbs, the other edition |
-| `src/guide.nabi`  | The docs' own pages (guide, examples, error codes) in both languages, and the docs home |
+| `src/spec.nabi`   | Spec pages in every language: sources, links, breadcrumbs, the other editions, the English page under a note where an edition lacks one |
+| `src/guide.nabi`  | The docs' own pages (guide, examples, error codes) in every language, and the docs home |
 | `src/apidoc.nabi` | API pages from the standard library sources |
 | `src/pkgdocs.nabi` | The packages' API pages (`/packages/<name>/<version>`) from what the registry made of each version |
 | `src/www.nabi`    | The nabi-lang.org pages (news/ listed newest first, releases/ from CHANGELOG.md), the download page's archive sizes, robots.txt, security.txt, the sitemap and the sitemap index, the brand files, the installers |
 | `src/home.nabi`   | The nabi-lang.org landing page; its release notes come from nabi's CHANGELOG.md, archive sizes from the GitHub release |
 | `src/search.nabi` | The search index of each language, the body-text index, and the files they are served as (`split`; `merge`, the packages' API in one) |
-| `src/links.nabi`  | Canonical links, error code links, Korean pages' links to English-only pages, the link check |
+| `src/links.nabi`  | Canonical links, error code links, other languages' links to English-only pages, the link check |
 | `src/files.nabi`  | A version directory as written: pages, 404s, search indexes, llms.txt, static files |
 | `src/versions.nabi` | Released versions re-wrapped from their archives, latest/, the files above the versions |
 | `src/layout.nabi` | Page frames: header, navigation, sidebar, footer, 404 |

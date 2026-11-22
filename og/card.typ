@@ -6,10 +6,15 @@
 #let ink2 = rgb("#bdb3b8")
 #let line2 = rgb("#3b3539")
 #let input(k) = sys.inputs.at(k, default: "")
-#let ko = input("lang") == "ko"
+#let lang = input("lang")
+// Hangul and Han: taller lines, less tracking
+#let cjk = lang in ("ko", "zh-Hans", "zh-Hant")
+// Han text in the script's own glyph forms: Noto Sans SC or TC
+// (NABI_WEB_OG_FONTS)
+#let (code, region, han) = if lang == "ko" { ("ko", none, ()) } else if lang == "zh-Hans" { ("zh", "CN", ("Noto Sans SC",)) } else if lang == "zh-Hant" { ("zh", "TW", ("Noto Sans TC",)) } else { ("en", none, ()) }
 
 #set page(width: 1200pt, height: 630pt, margin: (x: 72pt, y: 64pt), fill: bg)
-#set text(font: ("Geist", "Pretendard"), fill: ink, lang: if ko { "ko" } else { "en" }, hyphenate: false, top-edge: 0.8em, bottom-edge: -0.2em)
+#set text(font: ("Geist", "Pretendard") + han, fill: ink, lang: code, region: region, hyphenate: false, top-edge: 0.8em, bottom-edge: -0.2em)
 
 // `body` in lines of `pitch`, at most `n` of them (the rest is cut)
 #let lines(size, pitch, n, body) = context {
@@ -32,11 +37,11 @@
   ),
   [],
   {
-    let pitch = if ko { 80pt } else { 72pt }
-    lines(64pt, pitch, 3, text(font: ("Geist Mono", "Pretendard"), size: 60pt, weight: "semibold", tracking: if ko { -0.02em } else { -0.04em }, input("title")))
+    let pitch = if cjk { 80pt } else { 72pt }
+    lines(64pt, pitch, 3, text(font: ("Geist Mono", "Pretendard") + han, size: 60pt, weight: "semibold", tracking: if cjk { -0.02em } else { -0.04em }, input("title")))
   },
   if input("lead") != "" {
-    let pitch = if ko { 46pt } else { 40pt }
+    let pitch = if cjk { 46pt } else { 40pt }
     pad(top: 24pt, lines(28pt, pitch, 3, text(size: 28pt, fill: ink2, input("lead"))))
   },
 )

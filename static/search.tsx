@@ -1,7 +1,8 @@
 // Client-side search over search-index.json: {p: [[title, url]], h:
 // [[page, heading, id, named?, kind?]]}, read into [{t: title, u: url, p:
 // page}], and over the words of the pages' text in search-text/<shard>.json
-// (search.nabi's shard_of: a word's first letter), which point at the same
+// (search.nabi's shard_of: a word's first letter; Han text as pairs of
+// characters, web/js/lang's hanTerms), which point at the same
 // entries by number; a query reads only its words' shards. The excerpts
 // shown under the hits are search-x/<k>.json, 256 entries a file, read for
 // the hits shown. A package's own index carries its excerpts inline.
@@ -19,6 +20,7 @@ import { KbdHelp } from "./ui/kbd-help.tsx";
 import { mount, type Mounted } from "./ui/mount.ts";
 import { HereNote, LatestVersion, LostHint, MissingNote, Scrim, Toast } from "./ui/notes.tsx";
 import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/results.tsx";
+import { HAN, bare, dir as langDir, dirOf, hanTerms, lang, weight, type Code } from "../web/js/lang/lang.ts";
 
 (() => {
   /** search-index.json as written by the build. */
@@ -46,6 +48,12 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
     legend: Row[]; missing: (v: string) => string;
     help: string; rows: { search: string; all: string; pager: string; filter: string; help: string; esc: string };
     filter: string; shown: (n: number) => string; here: string; packages: string;
+    /** The 404 page's "Did you mean <a>?". */
+    lost: [lead: string, tail: string];
+    /** Where a hit lives: the docs' sections, as in the header. */
+    sec: Record<string, string>;
+    /** API kinds. */
+    kind: Record<string, string>;
   }
   // Elements that carry their running animation.
   interface Sliding extends HTMLElement { slid?: Animation | null }
@@ -65,14 +73,16 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
   const box = document.getElementById("results");
   let index: Entry[] | null = null;
   let sel = -1;
-  // Interface strings; Korean pages get Korean ones.
-  const ko = document.documentElement.lang === "ko";
+  // Interface strings in the page's language.
+  const here: Code = lang();
+  // Its directory under the version root ("", "ko/", "zh-hans/" ..).
+  const ld = langDir(here);
   // The index, fetched once. Declared before anything that may need it
   // at once (the 404 hint below).
   let loading: Promise<Entry[]> | null = null;
   const load = (): Promise<Entry[]> =>
     index ? Promise.resolve(index)
-      : loading ??= fetch(sroot + (ko && !scoped ? "ko/" : "") + "search-index.json").then((r) => {
+      : loading ??= fetch(sroot + (scoped ? "" : ld) + "search-index.json").then((r) => {
         if (!r.ok) throw new Error(`search-index.json: ${r.status}`);
         return r.json() as Promise<SearchIndex>;
       }).then((d) => {
@@ -84,7 +94,7 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
         }
         return idx;
       }).catch((e: unknown) => { loading = null; throw e; });
-  const dir = (ko && !scoped ? "ko/" : "");
+  const dir = scoped ? "" : ld;
   const getJson = <J,>(url: string): Promise<J> => fetch(url).then((r) => {
     if (!r.ok) throw new Error(`${url}: ${r.status}`);
     return r.json() as Promise<J>;
@@ -118,12 +128,15 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
     if ((c >= "0" && c <= "9") || c === "_") return "0";
     const h = c.charCodeAt(0);
     if (h >= 0xac00 && h <= 0xd7a3) return "k" + Math.floor((h - 0xac00) / 588);
+    // Han: 16 ranges of the unified ideographs, the rest in the last
+    if (h >= 0x4e00 && h <= 0x9fff) return "h" + Math.floor((h - 0x4e00) / 0x520);
+    if (HAN.test(c)) return "h15";
     return "other";
   };
   const loadShard = (key: string): Promise<Shard> => {
     let got = shards.get(key);
     if (!got) {
-      got = getJson<TextIndex>(`${root}${ko ? "ko/" : ""}search-text/${key}.json`).then((d) => ({ words: d.w.map(([w]) => w), posts: d.w.map(([, ids]) => ids) }));
+      got = getJson<TextIndex>(`${root}${ld}search-text/${key}.json`).then((d) => ({ words: d.w.map(([w]) => w), posts: d.w.map(([, ids]) => ids) }));
       shards.set(key, got);
     }
     return got;
@@ -172,7 +185,7 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
   // The Packages group: the registry's list, then every package's API,
   // fetched once; either alone will do, and none leaves the group out.
   const registry = (document.body.dataset.registry || "").replace(/\/$/, "");
-  const pkgRoot = ko ? "/ko/packages/" : "/packages/";
+  const pkgRoot = "/" + ld + "packages/";
   let pkgs: Promise<Entry[]> | null = null;
   const loadPkgs = (): Promise<Entry[]> => (pkgs ??= Promise.all([
     registry ? getJson<Listed[]>(registry + "/api/v1/docs?format=json").catch(() => [] as Listed[]) : Promise.resolve([] as Listed[]),
@@ -189,15 +202,37 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
     return out;
   }));
 
-  const T: Strings = ko
-    ? { run: "실행", runLabel: "플레이그라운드에서 실행", copy: "복사", copyLabel: "코드 복사", copied: "복사됨", collapse: "접기", none: "결과 없음", inLatest: "최신 문서에서 찾기 →", down: "검색할 수 없습니다. 잠시 후 다시 시도하세요.", copiedLink: "링크 복사됨", linkInBar: "주소창에 링크가 있습니다", press: (k) => `${k}를 누르세요`, version: "문서 버전", found: (n, all) => (all > n ? `결과 ${all}개 중 ${n}개 표시` : `결과 ${n}개`),
+  const STRINGS: Record<Code, Strings> = {
+    ko: { run: "실행", runLabel: "플레이그라운드에서 실행", copy: "복사", copyLabel: "코드 복사", copied: "복사됨", collapse: "접기", none: "결과 없음", inLatest: "최신 문서에서 찾기 →", down: "검색할 수 없습니다. 잠시 후 다시 시도하세요.", copiedLink: "링크 복사됨", linkInBar: "주소창에 링크가 있습니다", press: (k) => `${k}를 누르세요`, version: "문서 버전", found: (n, all) => (all > n ? `결과 ${all}개 중 ${n}개 표시` : `결과 ${n}개`),
         legend: [["↑ ↓", "이동"], ["↵", "열기"], ["esc", "닫기"]], missing: (v) => `${v}에는 그 페이지가 없어서 가장 가까운 페이지를 열었습니다.`,
         help: "키보드 단축키", rows: { search: "문서 검색", all: "문서, 표준 라이브러리, 패키지 검색", pager: "이전 / 다음 페이지", filter: "메서드 거르기", help: "이 도움말", esc: "닫기 / 검색 지우기" },
-        filter: "메서드 거르기", shown: (n) => `메서드 ${n}개`, here: "(지금 쓰는 시스템)", packages: "패키지" }
-    : { run: "Run", runLabel: "Run in the playground", copy: "Copy", copyLabel: "Copy code", copied: "Copied", collapse: "Collapse", none: "No results", inLatest: "Search the latest docs →", down: "Search is unavailable right now.", copiedLink: "Link copied", linkInBar: "link in the address bar", press: (k) => `Press ${k}`, version: "Docs version", found: (n, all) => (all > n ? `${n} of ${all} results shown` : n === 1 ? "1 result" : `${n} results`),
+        filter: "메서드 거르기", shown: (n) => `메서드 ${n}개`, here: "(지금 쓰는 시스템)", packages: "패키지",
+        lost: ["혹시 이 페이지인가요? ", ""],
+        sec: { learn: "가이드", examples: "예제", errors: "에러 코드", tools: "도구", libspec: "라이브러리 사양", spec: "언어 사양", std: "표준 라이브러리" },
+        kind: { method: "메서드", fn: "함수", struct: "struct", enum: "enum", trait: "트레잇", type: "타입 별칭", const: "상수", static: "정적", impl: "impl", package: "패키지", mod: "모듈" } },
+    en: { run: "Run", runLabel: "Run in the playground", copy: "Copy", copyLabel: "Copy code", copied: "Copied", collapse: "Collapse", none: "No results", inLatest: "Search the latest docs →", down: "Search is unavailable right now.", copiedLink: "Link copied", linkInBar: "link in the address bar", press: (k) => `Press ${k}`, version: "Docs version", found: (n, all) => (all > n ? `${n} of ${all} results shown` : n === 1 ? "1 result" : `${n} results`),
         legend: [["↑ ↓", "to move"], ["↵", "to open"], ["esc", "to close"]], missing: (v) => `That page is not in ${v}, so this is the closest one.`,
         help: "Keyboard shortcuts", rows: { search: "Search the docs", all: "Search docs, std and packages", pager: "Previous / next page", filter: "Filter methods", help: "This help", esc: "Close / clear search" },
-        filter: "Filter methods", shown: (n) => (n === 1 ? "1 method" : `${n} methods`), here: "(your system)", packages: "Packages" };
+        filter: "Filter methods", shown: (n) => (n === 1 ? "1 method" : `${n} methods`), here: "(your system)", packages: "Packages",
+        lost: ["Did you mean ", "?"],
+        sec: { learn: "Guide", examples: "Examples", errors: "Error codes", tools: "Tools", libspec: "Library spec", spec: "Language spec", std: "Std library" },
+        kind: { method: "method", fn: "fn", struct: "struct", enum: "enum", trait: "trait", type: "type", const: "const", static: "static", impl: "impl", package: "package", mod: "module" } },
+    "zh-Hans": { run: "运行", runLabel: "在演练场中运行", copy: "复制", copyLabel: "复制代码", copied: "已复制", collapse: "收起", none: "无结果", inLatest: "在最新文档中搜索 →", down: "暂时无法搜索，请稍后再试。", copiedLink: "已复制链接", linkInBar: "链接在地址栏中", press: (k) => `请按 ${k}`, version: "文档版本", found: (n, all) => (all > n ? `共 ${all} 个结果，显示 ${n} 个` : `${n} 个结果`),
+        legend: [["↑ ↓", "移动"], ["↵", "打开"], ["esc", "关闭"]], missing: (v) => `${v} 中没有那个页面，已为你打开最接近的页面。`,
+        help: "键盘快捷键", rows: { search: "搜索文档", all: "搜索文档、标准库和包", pager: "上一页 / 下一页", filter: "筛选方法", help: "显示此帮助", esc: "关闭 / 清除搜索" },
+        filter: "筛选方法", shown: (n) => `${n} 个方法`, here: "（你的系统）", packages: "包",
+        lost: ["你要找的是不是", "？"],
+        sec: { learn: "指南", examples: "示例", errors: "错误代码", tools: "工具", libspec: "库规范", spec: "语言规范", std: "标准库" },
+        kind: { method: "方法", fn: "函数", struct: "struct", enum: "enum", trait: "trait", type: "类型别名", const: "常量", static: "静态变量", impl: "impl", package: "包", mod: "模块" } },
+    "zh-Hant": { run: "執行", runLabel: "在演練場中執行", copy: "複製", copyLabel: "複製程式碼", copied: "已複製", collapse: "收合", none: "沒有結果", inLatest: "在最新文件中搜尋 →", down: "目前無法搜尋，請稍後再試。", copiedLink: "已複製連結", linkInBar: "連結在網址列中", press: (k) => `請按 ${k}`, version: "文件版本", found: (n, all) => (all > n ? `共 ${all} 筆結果，顯示 ${n} 筆` : `${n} 筆結果`),
+        legend: [["↑ ↓", "移動"], ["↵", "開啟"], ["esc", "關閉"]], missing: (v) => `${v} 沒有那個頁面，已為您開啟最接近的頁面。`,
+        help: "鍵盤快速鍵", rows: { search: "搜尋文件", all: "搜尋文件、標準函式庫和套件", pager: "上一頁 / 下一頁", filter: "篩選方法", help: "顯示此說明", esc: "關閉 / 清除搜尋" },
+        filter: "篩選方法", shown: (n) => `${n} 個方法`, here: "（您的系統）", packages: "套件",
+        lost: ["您要找的是不是", "？"],
+        sec: { learn: "指南", examples: "範例", errors: "錯誤代碼", tools: "工具", libspec: "函式庫規格", spec: "語言規格", std: "標準函式庫" },
+        kind: { method: "方法", fn: "函式", struct: "struct", enum: "enum", trait: "trait", type: "型別別名", const: "常數", static: "靜態變數", impl: "impl", package: "套件", mod: "模組" } },
+  };
+  const T = STRINGS[here];
 
   // Motion (nabi.css tokens): only after a click or a key, never on load,
   // and none with reduced motion.
@@ -351,13 +386,11 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
     if (document.fonts && document.fonts.ready) document.fonts.ready.then(fitNav);
   }
 
-  // Spec language switch: carry the current section over to the other
-  // edition (data-sec pairs this page's heading ids with the other's).
-  const sw = document.querySelector<HTMLElement>(".lang-menu[data-sec]");
-  const other = sw && sw.querySelector<HTMLAnchorElement>("a[hreflang]");
-  // other is only set when sw is
-  if (sw && other) {
-    const ids = sw.dataset.sec!.split(" ");
+  // The language menu carries the current section over to the page in
+  // another language (each link's data-sec pairs this page's heading ids
+  // with that page's).
+  for (const other of document.querySelectorAll<HTMLAnchorElement>(".lang-menu a[hreflang][data-sec]")) {
+    const ids = other.dataset.sec!.split(" ");
     const map: Record<string, string> = {};
     for (let i = 0; i + 1 < ids.length; i += 2) map[ids[i]!] = ids[i + 1]!;
     other.addEventListener("click", () => {
@@ -427,7 +460,7 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
     if (play && lang === "nabi" && deflate && runnableNabi(pre.innerText)) {
       packed(pre.innerText).then((code) => {
         // A Korean page opens the playground in Korean.
-        mount(<RunLink href={`${play}${ko ? "/ko" : "/"}#code=${code}`} text={T.run} label={T.runLabel} />, (t) => b.el.before(t));
+        mount(<RunLink href={`${play}/${ld.replace(/\/$/, "")}#code=${code}`} text={T.run} label={T.runLabel} />, (t) => b.el.before(t));
       }, () => {});
     }
     const ex = wrap.querySelector<HTMLElement>(".expand");
@@ -507,12 +540,11 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
     const ver = segs[0] || "";
     const rest = segs.slice(1).join("/");
     const say = (href: string, label: string): void => {
-      render(<LostHint lead={ko ? "혹시 이 페이지인가요? " : "Did you mean "} href={href} label={label} tail={ko ? "" : "?"} />, hint);
+      render(<LostHint lead={T.lost[0]} href={href} label={label} tail={T.lost[1]} />, hint);
       hint.hidden = false;
     };
     const near = (): Promise<void> => load().then((idx) => {
-      const lang = rest.startsWith("ko/") ? "ko/" : "";
-      const path = rest.slice(lang.length);
+      const path = bare(rest);
       const k = path.lastIndexOf("/");
       const dir = k < 0 ? "" : path.slice(0, k + 1);
       const leaf = path.slice(k + 1).toLowerCase();
@@ -537,24 +569,20 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
   // Where a hit lives, by the first part of its url: the section's one
   // name, as in the header.
   const under = (u: string, d: string): boolean => u === d || u.startsWith(d + "/") || u.startsWith(d + "#");
-  const SEC: [dir: string, name: string][] = ko
-    ? [["learn", "가이드"], ["examples", "예제"], ["errors", "에러 코드"], ["spec/refs-lang/009-tools", "도구"], ["spec/refs-standard-libraries", "라이브러리 사양"], ["spec", "언어 사양"], ["std", "표준 라이브러리"]]
-    : [["learn", "Guide"], ["examples", "Examples"], ["errors", "Error codes"], ["spec/refs-lang/009-tools", "Tools"], ["spec/refs-standard-libraries", "Library spec"], ["spec", "Language spec"], ["std", "Std library"]];
+  const SEC: [dir: string, name: string][] = [["learn", T.sec.learn!], ["examples", T.sec.examples!], ["errors", T.sec.errors!], ["spec/refs-lang/009-tools", T.sec.tools!], ["spec/refs-standard-libraries", T.sec.libspec!], ["spec", T.sec.spec!], ["std", T.sec.std!]];
   const where = (u: string): string => {
-    const v = u.replace(/^ko\//, "");
+    const v = bare(u);
     for (const [d, name] of SEC) if (under(v, d)) return name;
     return "";
   };
   // The section index of a page path (after the version directory).
   const sectionOf = (path: string): string => {
-    const lang = path.startsWith("ko/") ? "ko/" : "";
+    const lang = dirOf(path);
     const v = path.slice(lang.length);
     for (const [d] of SEC) if (under(v, d)) return lang + d;
     return lang.replace(/\/$/, "");
   };
-  const KIND: Record<string, string> = ko
-    ? { method: "메서드", fn: "함수", struct: "struct", enum: "enum", trait: "트레잇", type: "타입 별칭", const: "상수", static: "정적", impl: "impl", package: "패키지", mod: "모듈" }
-    : { method: "method", fn: "fn", struct: "struct", enum: "enum", trait: "trait", type: "type", const: "const", static: "static", impl: "impl", package: "package", mod: "module" };
+  const KIND = T.kind;
 
   // Docs: the version menu and, off the newest release, a banner.
   const vers = document.querySelector<HTMLDetailsElement>(".vers");
@@ -577,7 +605,7 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
           try { sessionStorage.setItem("nabi-missing", label); } catch {}
           const s = sectionOf(here);
           const to = "/" + dir + (s ? "/" + s : "");
-          const home = "/" + dir + (here.startsWith("ko/") ? "/ko" : "");
+          const home = "/" + dir + (dirOf(here) ? "/" + dirOf(here).replace(/\/$/, "") : "");
           if (to === home) { location.href = home; return; }
           fetch(to, { method: "HEAD" }).then((r2) => { location.href = r2.ok ? to : home; }, () => { location.href = home; });
         }, () => { location.href = a.href; });
@@ -609,7 +637,8 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
   const items = [...document.querySelectorAll<HTMLElement>("article .api-item")];
   if (items.some((it) => it.querySelector(".members > li"))) {
     const field = (shown: string) => <ApiFilter label={T.filter} shown={shown} onInput={apply} onKeyDown={(ev) => { if (ev.key === "Escape") { fi.value = ""; apply(); fi.blur(); } }} />;
-    const first = document.querySelector("article.prose > h2, article.prose > .api-item")!;
+    // in another language's chrome the English text is in a <div lang="en">
+    const first = document.querySelector("article.prose > h2, article.prose > .api-item, article.prose > div[lang] > h2, article.prose > div[lang] > .api-item")!;
     const box = mount<HTMLDivElement>(field(""), (el) => first.before(el));
     const fi = box.el.querySelector("input")!;
     const rail = [...document.querySelectorAll<HTMLElement>(".toc li.m, .toc-m li.m")];
@@ -751,9 +780,9 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
   const KIND_ORDER: Record<string, number> = { struct: 0, enum: 0, trait: 0, type: 1, fn: 2, const: 3, static: 3, impl: 4, method: 5 };
   const MAIN_TYPES = ["list", "str", "strbuf", "dict", "set"];
   const esc = (w: string): string => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  // A Hangul syllable says about as much as two Latin letters, so a
-  // two-syllable query is long enough to look into the excerpts.
-  const weight = (s: string): number => [...s].reduce((n, c) => n + (/[\u3131-\ud7a3]/.test(c) ? 2 : 1), 0);
+  // A Hangul syllable says about as much as two Latin letters, a Han
+  // character as three (weight), so a two-syllable query, or one Han
+  // character, is long enough to look into the text.
   // A Korean word of three syllables or more without its particle
   // ("타입을" -> "타입"): each term matches as typed or bare.
   const PARTICLE = /(으로|에서|에게|까지|부터|이나|은|는|이|가|을|를|의|에|로|와|과|도|만)$/;
@@ -771,7 +800,8 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
     }
     const word = new RegExp("(^|[^\\p{L}\\p{N}_])" + esc(query), "u");
     if (t.startsWith(query)) return 2;
-    if (word.test(t)) return 2.2;
+    // Chinese has no word breaks: anywhere in the title will do
+    if (word.test(t) || (HAN.test(query) && t.includes(query))) return 2.2;
     if (short) return -1;
     if (terms.every((w) => has(t, w))) return 2.5;
     // Excerpts count only where the index carries them (a package's);
@@ -784,7 +814,9 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
 
   const search = async (): Promise<void> => {
     const query = q!.value.trim().toLowerCase();
-    const terms = query.split(/\s+/).filter(Boolean);
+    // A Han run counts as its pairs of characters, as the text index
+    // holds it.
+    const terms = query.split(/\s+/).filter(Boolean).flatMap(hanTerms);
     if (!terms.length) { asked++; show(false); status!.textContent = ""; return; }
     let data: Entry[];
     try {
@@ -808,7 +840,7 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
     const withPkgs = !scoped && weight(query) >= 3;
     if (weight(query) >= 3 && !scoped) {
       // An entry counts when every term the index can hold found it.
-      const held = alts.filter((t) => !STOP.has(t[0]!) && (/[\uac00-\ud7a3]/.test(t[0]!) || t[0]!.length >= 3));
+      const held = alts.filter((t) => !STOP.has(t[0]!) && (/[\uac00-\ud7a3]/.test(t[0]!) || HAN.test(t[0]!) || t[0]!.length >= 3));
       const loaded = new Map<string, Shard>();
       let ok = true;
       await Promise.all([...new Set(held.flat().map(shardOf))].map((k) => loadShard(k).then((sh) => { loaded.set(k, sh); }, () => { ok = false; })));
@@ -838,7 +870,7 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
     const elsewhere = !hits.length && scoped
       ? (document.body.dataset.all || "") + encodeURIComponent(q!.value.trim())
       : !hits.length && /^\/\d+\.\d+(\.\d+)?\/$|^\/dev\/$/.test(root)
-        ? "/latest" + (ko ? "/ko" : "") + "?q=" + encodeURIComponent(q!.value.trim()) : "";
+        ? "/latest" + (ld ? "/" + ld.replace(/\/$/, "") : "") + "?q=" + encodeURIComponent(q!.value.trim()) : "";
     const fill = (): void => {
       list = { hits: shown, pkgs: [], terms: alts.flat(), root: sroot, elsewhere, gen: ++gen, text };
       sel = -1;

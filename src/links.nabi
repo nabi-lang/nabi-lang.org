@@ -1,12 +1,13 @@
 // Links in the written pages: each internal one made canonical, error
-// codes linked to their pages, a Korean page's links into English-only
-// pages pointed there, and the check for broken ones.
+// codes linked to their pages, a page's links into pages its language
+// lacks pointed at the English ones, and the check for broken ones.
 
 use pkg::layout;
 use pkg::layout::rel;
 use pkg::{Frag, Page, Site};
 use std::fs;
 use web::build::{attr_values, chars_of, dir_of};
+use web::lang;
 use web::url;
 
 /// `a/./b/../c` -> `a/c`; leading `..` kept.
@@ -148,11 +149,11 @@ pub fn relative_assets(root: str) throws -> List<str> {
 }
 
 /// `html` of page `out` with each `error[E...]` / `warning[E...]` inside a
-/// `<pre>` linked to its page (the Korean one on a Korean page), for the
+/// `<pre>` linked to its page (the one in the page's language), for the
 /// codes in `codes`.
 pub fn link_codes(html: str, out: str, codes: Set<str>) -> str {
     if codes.len() == 0 || !html.contains("[E") { return html; }
-    let pre = if out.starts_with("ko/") { "ko/" } else { "" };
+    let pre = lang::of_path(out).dir();
     let res = StrBuf::new();
     let rest = html;
     loop {
@@ -194,15 +195,17 @@ pub fn link_codes_in(s: str, to: fn(str) -> str) -> str {
     res.to_str()
 }
 
-/// `html` of Korean page `out` with links to Korean pages that do not
-/// exist (`outs` has them all), such as the API's or the logo, or to a
-/// section a Korean page does not have (`ids`: each page's ids), pointed
-/// at the English ones.
-pub fn ko_links(html: str, out: str, outs: Set<str>, ids: Dict<str, Set<str>>) -> str {
-    ko_attr(ko_attr(html, out, outs, ids, " href=\""), out, outs, ids, " src=\"")
+/// `html` of page `out`, in a language other than English, with links to
+/// pages in that language that do not exist (`outs` has them all), such
+/// as the API's or the logo, or to a section its page does not have
+/// (`ids`: each page's ids), pointed at the English ones. A link to a
+/// section of a page not translated yet (`fallback`), by the id its
+/// translation will give it, goes to the page.
+pub fn ko_links(html: str, out: str, outs: Set<str>, ids: Dict<str, Set<str>>, fallback: Set<str> = Set::new()) -> str {
+    ko_attr(ko_attr(html, out, outs, ids, fallback, " href=\""), out, outs, ids, fallback, " src=\"")
 }
 
-fn ko_attr(html: str, out: str, outs: Set<str>, ids: Dict<str, Set<str>>, pat: str) -> str {
+fn ko_attr(html: str, out: str, outs: Set<str>, ids: Dict<str, Set<str>>, fallback: Set<str>, pat: str) -> str {
     let res = StrBuf::new();
     let rest = html;
     loop {
@@ -222,13 +225,16 @@ fn ko_attr(html: str, out: str, outs: Set<str>, ids: Dict<str, Set<str>>, pat: s
         }
         let (path, frag) = if let i: usize = v.find("#") { (v[:i], v[i:]) } else { (v, "") };
         let target = norm(join(dir_of(out), path));
-        let plain = target.strip_prefix("ko/") ?? "";
+        let (tl, tail) = lang::split(target);
+        let plain = if tl.is_en() { "" } else { tail };
         // A section of the English text (an untranslated page's link) that
-        // the Korean page names otherwise: the English page.
+        // the page in its language names otherwise: the English page.
         let id = if frag.len() > 1 { frag[1:] } else { "" };
         let lacks = !id.is_empty() && !((ids.get(target) ?? Set::new()).contains(id)) && (ids.get(plain) ?? Set::new()).contains(id);
         if !plain.is_empty() && ((!outs.contains(target) && (outs.contains(plain) || !plain.ends_with(".html"))) || lacks) {
             res.push_str(rel(out, plain) + frag);
+        } else if !id.is_empty() && fallback.contains(target) && !((ids.get(target) ?? Set::new()).contains(id)) {
+            res.push_str(path);
         } else {
             res.push_str(v);
         }
@@ -237,8 +243,9 @@ fn ko_attr(html: str, out: str, outs: Set<str>, ids: Dict<str, Set<str>>, pat: s
 }
 
 /// `frags` with every `error[E...]` in a terminal or output block linked
-/// to its page (the error pages among `own`), and a Korean page's links
-/// into pages that exist only in English (the API, the logo) pointed there.
+/// to its page (the error pages among `own`), and the links of a page in
+/// another language into pages that exist only in English (the API, the
+/// logo) pointed there.
 pub fn fix(frags: Dict<str, Frag>, own: List<Page>) {
     let codes: Set<str> = Set::new();
     for p in own {
@@ -246,8 +253,10 @@ pub fn fix(frags: Dict<str, Frag>, own: List<Page>) {
     }
     let outs: Set<str> = Set::new();
     let ids: Dict<str, Set<str>> = Dict::new();
+    let fallback: Set<str> = Set::new();
     for o in frags.keys() {
         outs.insert(o);
+        if frags[o].noindex { fallback.insert(o); }
         let set: Set<str> = Set::new();
         for id in attr_values(chars_of(frags[o].body), "id") { set.insert(id); }
         ids.insert(o, set);
@@ -255,9 +264,9 @@ pub fn fix(frags: Dict<str, Frag>, own: List<Page>) {
     for o in outs {
         let f = frags[o];
         f.body = link_codes(f.body, o, codes);
-        if o.starts_with("ko/") {
-            f.body = ko_links(f.body, o, outs, ids);
-            f.side = ko_links(f.side, o, outs, ids);
+        if !lang::of_path(o).is_en() {
+            f.body = ko_links(f.body, o, outs, ids, fallback);
+            f.side = ko_links(f.side, o, outs, ids, fallback);
         }
         frags.insert(o, f);
     }
@@ -283,4 +292,10 @@ fn korean_links() {
     let h = ko_links("<a href=\"../std/index.html\">a</a><a href=\"a.html\">b</a><a href=\"../spec/x.html#intro\">c</a><img src=\"../../logo.svg\">", "ko/learn/a.html", outs, ids);
     assert(h.contains("href=\"../../std/index.html\"") && h.contains("href=\"a.html\""), h);
     assert(h.contains("href=\"../../spec/x.html#intro\"") && h.contains("src=\"../../logo.svg\""), h);
+    let later: Set<str> = Set::new();
+    later.insert("zh-hant/spec/x.html");
+    for o in ["zh-hant/spec/x.html", "zh-hant/learn/a.html"] { outs.insert(o); }
+    ids.insert("zh-hant/spec/x.html", en);
+    let z = ko_links("<a href=\"../spec/x.html#值語意\">a</a><a href=\"../spec/x.html#intro\">b</a>", "zh-hant/learn/a.html", outs, ids, later);
+    assert(z.contains("href=\"../spec/x.html\">a") && z.contains("href=\"../spec/x.html#intro\">b"), z);
 }

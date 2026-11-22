@@ -14,6 +14,8 @@ use pkg::layout;
 use pkg::layout::rel;
 use pkg::{Frag, Page, Site};
 use markdown::{Heading, esc};
+use web::lang;
+use web::lang::Lang;
 use web::apidoc::nav;
 use web::apidoc::{Item, Module, Reexport};
 
@@ -33,7 +35,7 @@ pub fn collect(lib: str) throws -> List<Module> { web::apidoc::pages(try web::ap
 
 fn md(text: str) -> str {
     if text.trim().is_empty() { return ""; }
-    let d = layout::md(shown(text), |h| h, false);
+    let d = layout::md(shown(text), |h| h, Lang::En);
     // The page's title is h1 (the module's path): a doc comment's own
     // headings start at h2, whether it writes `#` or `##`.
     let top = 7;
@@ -663,11 +665,11 @@ pub fn added_in(site: Site, mods: List<web::apidoc::Module>) throws -> Dict<str,
 }
 
 /// The standard library API (`std/<tier>/<module>.html`, from the
-/// library's English doc comments) as fragments into `out`, and `ko/std/`
-/// the same in Korean chrome; the modules and each language's API pages,
-/// for search. `spec` (the English spec pages) has the sections the
-/// modules point at.
-pub fn frags(site: Site, spec: List<Page>, out: Dict<str, Frag>) throws -> (List<Module>, List<Page>, List<Page>) {
+/// library's English doc comments) as fragments into `out`; the modules
+/// and the API pages, for search. `spec` (the English spec pages) has the
+/// sections the modules point at. Each other language's chrome around
+/// them is `edition`.
+pub fn frags(site: Site, spec: List<Page>, out: Dict<str, Frag>) throws -> (List<Module>, List<Page>) {
     let api: List<Page> = List::new();
     let mods = try collect(site.library);
     let since = try added_in(site, mods);
@@ -689,9 +691,17 @@ pub fn frags(site: Site, spec: List<Page>, out: Dict<str, Frag>) throws -> (List
     out.insert("std/index.html", Frag { out: "std/index.html", title: "Standard library API", side: "", body: index(mods, spec_secs), pager: "", head: "" });
     let (bare, all) = coverage(mods);
     if bare > 0 { eprintln(f"note: {bare} of {all} public API items and members have no doc comment"); }
-    let api_ko: List<Page> = List::new();
-    for p in api { api_ko.push(Page { src: "", out: "ko/" + p.out, dir: "ko/std", title: p.title, html: "", heads: p.heads, notes: p.notes }); }
-    let api_note = "<p class=\"tr-note\">API 참조는 영어로만 있습니다. 표준 라이브러리 소스의 영어 문서 주석에서 만듭니다.</p>\n";
+    (mods, api)
+}
+
+/// The API pages `api` (frags) in `l`'s chrome, `<lang>/std/`: the same
+/// English text under a note, out of search engines, into `out`; their
+/// pages for `l`'s search.
+pub fn edition(api: List<Page>, l: Lang, out: Dict<str, Frag>) -> List<Page> {
+    let pages: List<Page> = List::new();
+    for p in api { pages.push(Page { src: "", out: l.path(p.out), dir: l.dir() + "std", title: p.title, html: "", heads: p.heads, notes: p.notes }); }
+    let note = layout::tr(l, "", "API 참조는 영어로만 있습니다. 표준 라이브러리 소스의 영어 문서 주석에서 만듭니다.", "API 参考只有英文版，由标准库源代码中的英文文档注释生成。", "API 參考只有英文版，由標準函式庫原始碼中的英文文件註解產生。");
+    let api_note = f"<p class=\"tr-note\">{note}</p>\n";
     let std_outs: List<str> = List::new();
     for o in out.keys() {
         if o.starts_with("std/") { std_outs.push(o); }
@@ -699,11 +709,21 @@ pub fn frags(site: Site, spec: List<Page>, out: Dict<str, Frag>) throws -> (List
     for o in std_outs {
         let f = out[o];
         let text = if let k: usize = f.body.find("</h1>") { f.body[:k + 5] + "\n" + api_note + "<div lang=\"en\">\n" + f.body[k + 5:] + "</div>\n" } else { api_note + "<div lang=\"en\">\n" + f.body + "</div>\n" };
-        out.insert("ko/" + o, Frag { out: "ko/" + o, title: f.title, side: f.side, toc: f.toc, body: text, pager: "", head: "", alt: o, noindex: true, trail: f.trail });
-        f.alt = "ko/" + o;
+        let mine = l.path(o);
+        let alts: Dict<str, str> = Dict::new();
+        for m in lang::ALL {
+            if m != l { alts.insert(m.code(), m.path(o)); }
+        }
+        out.insert(mine, Frag { out: mine, title: f.title, side: f.side, toc: f.toc, body: text, pager: "", head: "", alt: o, alts: alts, noindex: true, trail: f.trail });
+        if l == Lang::Ko { f.alt = mine; }
+        // a dict of its own: a default one may be shared
+        let en_alts: Dict<str, str> = Dict::new();
+        for (k, v) in f.alts.iter() { en_alts.insert(k, v); }
+        en_alts.insert(l.code(), mine);
+        f.alts = en_alts;
         out.insert(o, f);
     }
-    (mods, api, api_ko)
+    pages
 }
 
 #[test]

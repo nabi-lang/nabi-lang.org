@@ -30,6 +30,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use web::http;
 use web::http::Request;
+use web::lang;
 use web::url;
 
 static STALE: Atomic<i32> = Atomic::new(1);
@@ -433,7 +434,7 @@ const PINNED: str = "public, max-age=86400, stale-while-revalidate=604800";
 pub fn cache_for(f: str, path: str, query: str, docs: bool) -> str {
     if f.ends_with(".html") {
         let first = (path[1:].split_once("/") ?? (path[1:], "")).0;
-        let pp = path.strip_prefix("/ko") ?? path;
+        let pp = lang::split(path).1;
         if docs && pp.starts_with("/packages/") {
             let rest = (pp["/packages/".len():].split_once("/") ?? ("", "")).1;
             let ver = (rest.split_once("/") ?? (rest, "")).0;
@@ -461,15 +462,17 @@ pub fn query_v(query: str) -> str {
 pub fn redirect(path: str, docs: bool) -> str | none {
     let c = url::canonical(path) ?? path;
     if docs && c == "/" { c = "/latest"; }
-    // The addresses people guess on the home site.
+    // The addresses people guess on the home site, in each language.
     if !docs {
-        for (from, to) in [("/install", "/download"), ("/ko/install", "/ko/download"), ("/learn", "https://docs.nabi-lang.org/latest/learn"), ("/ko/learn", "https://docs.nabi-lang.org/latest/ko/learn"), ("/docs", "https://docs.nabi-lang.org/latest")] {
-            if c == from { return to; }
+        let (l, at) = lang::split(c);
+        let pre = if l.is_en() { "" } else { "/" + l.slug() };
+        for (from, to) in [("/install", pre + "/download"), ("/learn", "https://docs.nabi-lang.org/latest" + pre + "/learn"), ("/docs", "https://docs.nabi-lang.org/latest" + pre)] {
+            if at == from { return to; }
         }
     }
     // A package's docs without a version: its newest.
     if docs {
-        if let name: str = (c.strip_prefix("/ko") ?? c).strip_prefix("/packages/") {
+        if let name: str = lang::split(c).1.strip_prefix("/packages/") {
             // A file of the list (search-index.json) is no package.
             if !name.is_empty() && !name.contains("/") && !name.contains(".") { c = c + "/latest"; }
         }
@@ -531,8 +534,9 @@ fn route(cfg: Cfg, r: Request) -> Resp {
     if docs {
         let (first, rest) = p[1:].split_once("/") ?? ("", "");
         if !first.is_empty() && !first.contains("..") && fs::exists(root + "/" + first + "/404.html") { nf = root + "/" + first + "/404.html"; }
-        // Under /<version>/ko/, the Korean one.
-        if (rest == "ko" || rest.starts_with("ko/")) && fs::exists(root + "/" + first + "/ko/404.html") { nf = root + "/" + first + "/ko/404.html"; }
+        // Under /<version>/<lang>/, the one in that language.
+        let l = lang::of_path(rest);
+        if !l.is_en() && fs::exists(root + "/" + first + "/" + l.dir() + "404.html") { nf = root + "/" + first + "/" + l.dir() + "404.html"; }
     }
     if fs::exists(nf) { return Resp { status: 404, headers: ["Content-Type: text/html; charset=utf-8", "Cache-Control: no-store"], body: "", file: nf }; }
     text(404, "not found")
@@ -714,6 +718,9 @@ fn redirects() {
     assert(to("/packages/search-index.json", true) == "-", "the list's search index");
     assert(to("/packages", true) == "-" && to("/packages/json/0.2.0", true) == "-" && to("/packages/json", false) == "-", "package docs pages");
     assert(to("/ko/packages/json", true) == "/ko/packages/json/latest" && to("/ko/packages", true) == "-", "in the Korean chrome");
+    assert(to("/zh-hans/packages/json", true) == "/zh-hans/packages/json/latest" && to("/zh-hant/packages/json/", true) == "/zh-hant/packages/json/latest" && to("/zh-hans/packages", true) == "-", "in the Chinese chrome");
+    assert(to("/zh-hant/install", false) == "/zh-hant/download" && to("/ko/install", false) == "/ko/download" && to("/zh-hans/learn", false) == "https://docs.nabi-lang.org/latest/zh-hans/learn" && to("/ko/docs", false) == "https://docs.nabi-lang.org/latest/ko", "guessed addresses in each language");
+    assert(to("/zh-hans/", false) == "/zh-hans" && to("/latest/zh-hant/", true) == "/latest/zh-hant" && to("/latest/zh-hans/learn/index.html", true) == "/latest/zh-hans/learn" && to("/zh-hans", false) == "-", "language roots");
     assert(MOVED.contains("max-age=86400") && CSP.contains("connect-src 'self' https://docs.nabi-lang.org https://packages.nabi-lang.org"), "301s keep a day; the palette reaches the other hosts");
     let idx = page("out/docs/latest/search-index.json", "/latest/search-index.json", "", true);
     assert(idx.headers.contains("Access-Control-Allow-Origin: *") && !page("out/www/x.json", "/x.json", "", false).headers.contains("Access-Control-Allow-Origin: *"), "cors on the docs' json");
@@ -728,5 +735,6 @@ fn redirects() {
     assert(cache_for("out/docs/latest/search-index.json", "/latest/search-index.json", "", true) == FRESH, "index");
     assert(cache_for("out/docs/packages/json/0.2.0/read.html", "/packages/json/0.2.0/read", "", true) == PINNED && cache_for("out/docs/packages/json/latest/read.html", "/packages/json/latest/read", "", true) == FRESH, "package docs");
     assert(cache_for("out/docs/ko/packages/json/0.2.0.html", "/ko/packages/json/0.2.0", "", true) == PINNED && cache_for("out/docs/packages/index.html", "/packages", "", true) == FRESH, "korean chrome, the list");
+    assert(cache_for("out/docs/zh-hant/packages/json/0.2.0.html", "/zh-hant/packages/json/0.2.0", "", true) == PINNED && cache_for("out/docs/zh-hans/packages/json/latest.html", "/zh-hans/packages/json/latest", "", true) == FRESH, "chinese chrome");
     assert(to("//evil.example/", false) == "/evil.example" && to("/\\evil.example/", false) == "-", "off-site");
 }

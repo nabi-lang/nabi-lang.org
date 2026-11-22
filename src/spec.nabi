@@ -1,14 +1,16 @@
-// The spec pages (English at `spec/`, Korean at `ko/spec/`): sources,
-// links between them and to the repository, the breadcrumb and the
-// pairing of each page with its other edition.
+// The spec pages (English at `spec/`, the other languages at
+// `<lang>/spec/`): sources, links between them and to the repository, the
+// breadcrumb and the pairing of each page with its other editions.
 
 use pkg::layout;
 use pkg::layout::rel;
 use pkg::links::{join, norm};
-use pkg::{Frag, Page, Site, edit_url, hreflang, updated};
+use pkg::{Ed, Frag, Page, Site, edit_url, hreflang, is_real, updated};
 use markdown::Heading;
 use std::fs;
 use web::build::dir_of;
+use web::lang;
+use web::lang::Lang;
 
 /// Output path of a spec source: `x/README.md` -> `spec/x/index.html`.
 fn out_of(src: str) -> str {
@@ -36,9 +38,10 @@ fn link(site: Site, spec: str, prefix: str, href: str, src_dir: str, out: str) -
     }
     let target = norm(join(src_dir, path));
     if target == ".." || target.starts_with("../") {
-        // The other edition (`../ko/README.md`): its pages here.
-        for (ed, pre) in [("en", ""), ("ko", "ko/")] {
-            if pre == "ko/" && site.spec_ko.is_empty() { continue; }
+        // Another edition (`../ko/README.md`): its pages here.
+        for l in lang::ALL {
+            let ed = if l.is_en() { "en" } else { l.slug() };
+            let pre = l.dir();
             let top = "../" + ed;
             if target != top && !target.starts_with(top + "/") { continue; }
             let r = target[top.len():].trim_start_matches("/");
@@ -108,7 +111,7 @@ fn sec_map(a: List<Heading>, b: List<Heading>) -> str {
     out.to_str()
 }
 
-/// The other edition's page of `p` among `others` (the same source), with
+/// Another edition's page of `p` among `others` (the same source), with
 /// the heading pairs for search.js; `("", "")` if it has none.
 pub fn twin(p: Page, others: List<Page>) -> (str, str) {
     for o in others {
@@ -120,7 +123,7 @@ pub fn twin(p: Page, others: List<Page>) -> (str, str) {
 /// The edit link of spec page `p` of the edition in `spec`.
 pub fn edit(site: Site, spec: str, p: Page, upd: Dict<str, str>) -> str {
     let path = f"{last_seg(spec)}/{p.src}";
-    layout::edit_link(edit_url(site, site.spec_repo, site.spec_branch, path), upd.get(path) ?? "", p.out.starts_with("ko/"))
+    layout::edit_link(edit_url(site, site.spec_repo, site.spec_branch, path), upd.get(path) ?? "", lang::of_path(p.out))
 }
 
 pub fn root(dir: str) -> str {
@@ -133,10 +136,10 @@ pub fn root(dir: str) -> str {
 /// (layout::section), outermost first, as breadcrumb links.
 pub fn crumb(pages: List<Page>, k: usize) -> str {
     let p = pages[k];
-    let ko = p.out.starts_with("ko/");
-    let (_, _, _, index) = layout::section(if ko { p.out["ko/".len():] } else { p.out });
+    let (l, at) = lang::split(p.out);
+    let index = layout::section(at).index;
     if index.is_empty() { return ""; }
-    let top = layout::in_lang(index, ko);
+    let top = l.path(index);
     if p.out == top { return ""; }
     let chain: List<str> = List::new();
     let d = p.dir;
@@ -156,7 +159,7 @@ pub fn crumb(pages: List<Page>, k: usize) -> str {
 }
 
 /// The spec edition in `spec`, rendered under `prefix` (`""`, `"ko/"`).
-pub fn pages(site: Site, spec: str, prefix: str, ko: bool) throws -> List<Page> {
+pub fn pages(site: Site, spec: str, prefix: str, l: Lang) throws -> List<Page> {
     let srcs: List<str> = List::new();
     try for e in fs::walk(spec) {
         let p = e.path().as_str();
@@ -169,7 +172,7 @@ pub fn pages(site: Site, spec: str, prefix: str, ko: bool) throws -> List<Page> 
         let dir = dir_of(src);
         let text = try fs::read_to_str(spec + "/" + src);
         if src == "README.md" { text = intro(text); }
-        let doc = layout::md(text, |h| link(site, spec, prefix, h, dir, out), ko);
+        let doc = layout::md(text, |h| link(site, spec, prefix, h, dir, out), l);
         let title = if doc.title.is_empty() { src } else { doc.title };
         pages.push(Page { src: src, out: out, dir: dir, title: title, html: doc.html, heads: doc.headings });
     }
@@ -241,18 +244,83 @@ pub fn sections(pages: List<Page>) -> Dict<str, str> {
     out
 }
 
-/// Both editions' pages as fragments into `out`: each with its sidebar,
-/// pager, edit link and breadcrumb, and the hreflang links to its page in
-/// the other edition.
-pub fn frags(site: Site, pages: List<Page>, ko_pages: List<Page>, out: Dict<str, Frag>) {
+/// The directory of the spec's edition in `l`: site.spec for English,
+/// else its field in site.nabion, else the language's directory beside
+/// the English one (`spec/zh-hans`).
+pub fn dir_in(site: Site, l: Lang) -> str {
+    let set = match l {
+        Lang::En => site.spec,
+        Lang::Ko => site.spec_ko,
+        Lang::ZhHans => site.spec_zh_hans,
+        Lang::ZhHant => site.spec_zh_hant,
+    };
+    if !set.is_empty() { return set; }
+    let r = root(site.spec);
+    let up = dir_of(r);
+    (if up.is_empty() { "" } else { up + "/" }) + l.slug()
+}
+
+/// The spec in `l` beside the English pages `en`, page for page: its own
+/// where the edition has it, else the English one under a note; with the
+/// pages that are its own.
+pub fn edition(site: Site, en: List<Page>, l: Lang) throws -> (List<Page>, Set<str>) {
+    let d = dir_in(site, l);
+    let mine: Dict<str, Page> = Dict::new();
+    if fs::exists(d) {
+        for p in try pages(site, root(d), l.dir(), l) { mine.insert(p.src, p); }
+    }
+    let out: List<Page> = List::new();
+    let real: Set<str> = Set::new();
+    for p in en {
+        if let q: Page = mine.get(p.src) {
+            out.push(q);
+            real.insert(q.out);
+        } else {
+            out.push(Page { src: p.src, out: l.path(p.out), dir: p.dir, title: p.title, html: layout::untranslated(l) + "<div lang=\"en\">\n" + p.html + "</div>\n", heads: p.heads });
+        }
+    }
+    for src in mine.keys() {
+        if !real.contains(l.path(out_of(src))) { eprintln(f"note: {d}/{src} has no English page, so it is not built"); }
+    }
+    (out, real)
+}
+
+/// Every edition's pages as fragments into `out`: each with its sidebar,
+/// pager, edit link and breadcrumb, the hreflang links between the
+/// editions written in their language, and its page in each other one.
+pub fn frags(site: Site, eds: List<Ed>, out: Dict<str, Frag>) {
     let upd = updated(dir_of(root(site.spec)));
-    for (eds, others, spec, ko) in [(pages, ko_pages, site.spec, false), (ko_pages, pages, site.spec_ko, true)] {
-        for k in 0..eds.len() {
-            let p = eds[k];
-            let (alt, sec) = twin(p, others);
-            // Each spec page names its other edition for search engines.
-            let head = if alt.is_empty() { "" } else { hreflang(site, if ko { alt } else { p.out }, if ko { p.out } else { alt }) };
-            out.insert(p.out, Frag { out: p.out, title: p.title, side: layout::sidebar(eds, k), toc: layout::toc(p), body: p.html + edit(site, spec, p, upd), pager: layout::pager(eds, k, ko), head: head, alt: alt, sec: sec, crumb: crumb(eds, k) });
+    for e in eds {
+        let spec = dir_in(site, e.lang);
+        for k in 0..e.spec.len() {
+            let p = e.spec[k];
+            let real = is_real(e, p.out);
+            let alts: Dict<str, str> = Dict::new();
+            let secs: Dict<str, str> = Dict::new();
+            let named: List<(Lang, str)> = List::new();
+            let alt = "";
+            let sec = "";
+            for o in eds {
+                if o.lang == e.lang {
+                    if real { named.push((o.lang, p.out)); }
+                    continue;
+                }
+                let (a, s) = twin(p, o.spec);
+                if a.is_empty() { continue; }
+                alts.insert(o.lang.code(), a);
+                secs.insert(o.lang.code(), s);
+                if real && is_real(o, a) { named.push((o.lang, a)); }
+                // The English page of the others, the Korean one of English.
+                if (!e.lang.is_en() && o.lang.is_en()) || (e.lang.is_en() && o.lang == Lang::Ko) {
+                    alt = a;
+                    sec = s;
+                }
+            }
+            // Each page written in its language names the others for
+            // search engines.
+            let head = if real && named.len() > 1 { hreflang(site, named) } else { "" };
+            let link = if real { edit(site, spec, p, upd) } else { edit(site, site.spec, Page { src: p.src, out: p.out[e.lang.dir().len():], dir: p.dir, title: p.title, html: "", heads: p.heads }, upd) };
+            out.insert(p.out, Frag { out: p.out, title: p.title, side: layout::sidebar(e.spec, k), toc: layout::toc(p), body: p.html + link, pager: layout::pager(e.spec, k, e.lang), head: head, alt: alt, sec: sec, alts: alts, secs: secs, noindex: !real, crumb: crumb(e.spec, k) });
         }
     }
 }

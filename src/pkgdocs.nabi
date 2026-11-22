@@ -23,6 +23,8 @@ use std::process::{Command, Stdio};
 use web::apidoc::Module;
 use web::apidoc::nav;
 use web::build::json_str;
+use web::lang;
+use web::lang::Lang;
 
 /// One version in the registry's docs index.
 #[derive(Nabion)]
@@ -235,14 +237,17 @@ fn index_page(site: Site, pkgs: List<(DocsPackage, str)>, chrome: str, lp: str) 
 
 /// Package docs written while the registry served them itself link to
 /// `<registry>/docs/<name>/<version>`, which no longer exists: here.
-fn moved(site: Site, html: str, ko: bool) -> str { html.replace(f"href=\"{site.packages}/docs/", if ko { "href=\"/ko/packages/" } else { "href=\"/packages/" }) }
+fn moved(site: Site, html: str, l: Lang) -> str { html.replace(f"href=\"{site.packages}/docs/", f"href=\"/{l.dir()}packages/") }
 
 /// The `<link rel="alternate">`s of a package page `out`: its English
-/// page and the same in the Korean header and footer.
+/// page and the same in each other language's header and footer.
 fn alternates(site: Site, out: str) -> str {
-    let en = out.strip_prefix("ko/") ?? out;
+    let en = lang::split(out).1;
     let u = |o: str| esc(site.docs_url + web::url::canon("/" + o));
-    f"<link rel=\"alternate\" hreflang=\"en\" href=\"{u(en)}\">\n<link rel=\"alternate\" hreflang=\"ko\" href=\"{u("ko/" + en)}\">\n<link rel=\"alternate\" hreflang=\"x-default\" href=\"{u(en)}\">\n"
+    let b = StrBuf::new();
+    for l in lang::ALL { b.push_str(f"<link rel=\"alternate\" hreflang=\"{l.code()}\" href=\"{u(l.path(en))}\">\n"); }
+    b.push_str(f"<link rel=\"alternate\" hreflang=\"x-default\" href=\"{u(en)}\">\n");
+    b.to_str()
 }
 
 /// Every package's pages from `dir` (sync) into `docs_root/packages/`,
@@ -272,9 +277,11 @@ pub fn write(site: Site, docs_root: str, dir: str, chrome: str) throws -> usize 
             loaded.insert(v.version, d);
             pages.insert(v.version, module_pages(d));
         }
-        // Each page twice: the docs are in English, and `ko/` is the
-        // same page in the Korean header and footer.
-        for lp in ["", "ko/"] {
+        // Each page in every language: the docs are in English, and
+        // `ko/`, `zh-hans/` .. are the same page in that language's
+        // header and footer.
+        for l in lang::ALL {
+            let lp = l.dir();
             for v in vs {
                 let d = loaded.get(v.version) ?? { continue; };
                 version_pages(site, p, v, d, v.version, vs, newest.version, pages, docs, chrome, lp, files);
@@ -294,7 +301,8 @@ pub fn write(site: Site, docs_root: str, dir: str, chrome: str) throws -> usize 
         ps.push_str(f"[{json_str(p.name)},{json_str(p.name + "/latest")},{json_str(p.description)}]");
     }
     let pidx = f"{{\"p\":[\n{ps.to_str()}],\n\"h\":[]}}\n";
-    for lp in ["", "ko/"] {
+    for l in lang::ALL {
+        let lp = l.dir();
         files.insert(lp + "packages/index.html", index_page(site, listed, chrome, lp));
         files.insert(lp + "packages/search-index.json", pidx);
     }
@@ -306,16 +314,19 @@ pub fn write(site: Site, docs_root: str, dir: str, chrome: str) throws -> usize 
     }
     let api = pkg::search::merge(parts);
     files.insert("packages/search-api.json", api);
-    files.insert("ko/packages/search-api.json", api);
+    for l in lang::ALL {
+        if !l.is_en() { files.insert(l.dir() + "packages/search-api.json", api); }
+    }
     files.insert("packages/sitemap.xml", sitemap(site, dir, listed, files));
-    for gone in [docs_root + "/packages", docs_root + "/ko/packages"] {
+    for l in lang::ALL {
+        let gone = docs_root + "/" + l.dir() + "packages";
         if fs::exists(gone) { try fs::remove_dir_all(gone); }
     }
     for k in files.keys() {
         let path = docs_root + "/" + k;
         try fs::create_dir_all(path[:path.rfind("/") ?? 0]);
         // Served at canonical addresses (no `.html`): links from the root.
-        try fs::write(path, links::site_hrefs(site, moved(site, files[k], k.starts_with("ko/")), "", k));
+        try fs::write(path, links::site_hrefs(site, moved(site, files[k], lang::of_path(k)), "", k));
     }
     files.len()
 }

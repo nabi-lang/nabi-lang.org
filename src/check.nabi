@@ -83,12 +83,15 @@ pub fn code_check(filter: str) throws -> List<str> {
     let paths: List<str> = List::new();
     let site = try load_site();
     for src in try guide::sources(site.docs) { paths.push(site.docs + "/" + src); }
-    if fs::exists(site.docs + "/ko") {
-        for src in try guide::sources(site.docs + "/ko") { paths.push(site.docs + "/ko/" + src); }
+    for l in web::lang::ALL {
+        if l.is_en() || !fs::exists(site.docs + "/" + l.slug()) { continue; }
+        for src in try guide::sources(site.docs + "/" + l.slug()) { paths.push(site.docs + "/" + l.dir() + src); }
     }
     paths.push(site.www + "/index.md");
     paths.push(site.www + "/download.md");
-    if fs::exists(site.www + "/ko/download.md") { paths.push(site.www + "/ko/download.md"); }
+    for l in web::lang::ALL {
+        if !l.is_en() && fs::exists(site.www + "/" + l.dir() + "download.md") { paths.push(site.www + "/" + l.dir() + "download.md"); }
+    }
     let pkgs = try env::var("NABI_PACKAGES") catch _ { "" };
     for page in paths {
         // ```text check= blocks are the content tool's.

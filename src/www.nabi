@@ -6,13 +6,15 @@ use pkg::files::copy_static;
 use pkg::home;
 use pkg::layout;
 use pkg::links::site_hrefs;
-use pkg::{Page, Site};
+use pkg::{Ed, Site};
 use std::fs;
 use std::nabion;
 use std::process::{Command, Stdio};
 use web::build::{between, write};
 use web::chrome;
 use web::kit;
+use web::lang;
+use web::lang::Lang;
 use pkg::layout::tr;
 
 /// A sitemap of `urls`, each `(address, last modified)`; a date of `""`
@@ -102,17 +104,21 @@ pub fn os_attrs(triple: str) -> str {
     f" data-os=\"{os}\" data-arch=\"{arch}\" data-libc=\"{libc}\""
 }
 
-/// Page `path` of nabi-lang/www as HTML, with its title. `{release}` is
-/// the release the download page offers; `docs:<path>` links into the
-/// newest docs (`dir` "ko/": the Korean docs), `play:` into the
-/// playground.
-fn render(site: Site, path: str, dir: str) throws -> (str, str) {
-    let ko = !dir.is_empty();
+/// Page `path` of nabi-lang/www as HTML, with its title and headings.
+/// `{release}` is the release the download page offers; `docs:<path>`
+/// links into the newest docs (`dir` "ko/": the Korean docs), `play:`
+/// into the playground.
+fn render_doc(site: Site, path: str, dir: str) throws -> markdown::Doc {
     let text = uncommented(try fs::read_to_str(path)).replace("{release}", site.release);
-    let doc = layout::md(text, |h| if h.starts_with("docs:") { layout::latest(site, dir + h["docs:".len():]) } else { h }, ko);
+    let doc = layout::md(text, |h| if h.starts_with("docs:") { layout::latest(site, dir + h["docs:".len():]) } else { h }, lang::of_path(dir));
     // Raw HTML blocks are not seen by the link mapper.
-    let html = doc.html.replace("href=\"docs:", "href=\"" + site.docs_url + "/latest/" + dir).replace("href=\"play:", "href=\"" + site.playground + "/");
-    (doc.title, html)
+    doc.html = doc.html.replace("href=\"docs:", "href=\"" + site.docs_url + "/latest/" + dir).replace("href=\"play:", "href=\"" + site.playground + "/");
+    doc
+}
+
+fn render(site: Site, path: str, dir: str) throws -> (str, str) {
+    let doc = try render_doc(site, path, dir);
+    (doc.title, doc.html)
 }
 
 /// `text` without the lines that are one whole HTML comment, which the
@@ -143,8 +149,8 @@ pub fn post_date(text: str) -> str {
     if let (d, _): (str, usize) = between(text, 0, "<!-- date: ", "-->") { d.trim() } else { "" }
 }
 
-/// The posts under `dir` (www's news/ or ko/news/), newest first; one
-/// not yet dated goes on top.
+/// The posts under `dir` (www's news/, ko/news/, zh-hans/news/ ..), newest
+/// first; one not yet dated goes on top.
 pub fn posts(site: Site, dir: str, lang: str) throws -> List<Post> {
     let list: List<Post> = List::new();
     if !fs::exists(dir) { return list; }
@@ -162,8 +168,8 @@ pub fn posts(site: Site, dir: str, lang: str) throws -> List<Post> {
 }
 
 /// A post's date line, under its title.
-pub fn dated(p: Post, ko: bool) -> str {
-    let when = if p.date.starts_with("2") { f"<time datetime=\"{markdown::esc(p.date)}\">{layout::long_date(p.date, ko)}</time>" } else if ko { "공개 전" } else { "Not published yet" };
+pub fn dated(p: Post, l: Lang) -> str {
+    let when = if p.date.starts_with("2") { f"<time datetime=\"{markdown::esc(p.date)}\">{layout::long_date(p.date, l)}</time>" } else { tr(l, "Not published yet", "공개 전", "尚未发布", "尚未發布") };
     f"<p class=\"post-date\">{when}</p>"
 }
 
@@ -174,21 +180,21 @@ fn after_h1(html: str, extra: str) -> str {
 }
 
 /// The list of `posts` on news/index.html, each linking to its page.
-pub fn post_list(list: List<Post>, ko: bool) -> str {
+pub fn post_list(list: List<Post>, l: Lang) -> str {
     let b = StrBuf::new();
     b.push_str("<ul class=\"posts\">");
     for p in list {
-        b.push_str(f"<li><a href=\"{markdown::esc(p.name)}.html\">{p.title}</a> {dated(p, ko)}</li>");
+        b.push_str(f"<li><a href=\"{markdown::esc(p.name)}.html\">{p.title}</a> {dated(p, l)}</li>");
     }
     b.push_str("</ul>\n");
     b.to_str()
 }
 
-/// The Atom feed of the news posts of `lang` (`""` or `ko/`) that are
-/// out, newest first (RFC 4287).
-pub fn feed(site: Site, posts: List<Post>, lang: str) -> str {
-    let ko = !lang.is_empty();
-    let base = site.base_url + "/" + lang;
+/// The Atom feed of the news posts of language directory `dir` (`""`,
+/// `ko/` ..) that are out, newest first (RFC 4287).
+pub fn feed(site: Site, posts: List<Post>, dir: str) -> str {
+    let l = lang::of_path(dir);
+    let base = site.base_url + "/" + dir;
     let x = |s: str| s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;");
     let out: List<Post> = List::new();
     for p in posts {
@@ -198,8 +204,8 @@ pub fn feed(site: Site, posts: List<Post>, lang: str) -> str {
     let updated = if out.is_empty() { "2026-11-22" } else { out[0].date };
     let b = StrBuf::new();
     b.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<feed xmlns=\"http://www.w3.org/2005/Atom\"");
-    b.push_str(f" xml:lang=\"{if ko { "ko" } else { "en" }}\">\n");
-    b.push_str(f"<title>{if ko { "Nabi 소식" } else { "Nabi news" }}</title>\n<id>{x(base)}news</id>\n");
+    b.push_str(f" xml:lang=\"{l.code()}\">\n");
+    b.push_str(f"<title>{tr(l, "Nabi news", "Nabi 소식", "Nabi 动态", "Nabi 最新消息")}</title>\n<id>{x(base)}news</id>\n");
     b.push_str(f"<link rel=\"self\" href=\"{x(base)}news/feed.xml\"/>\n<link rel=\"alternate\" type=\"text/html\" href=\"{x(base)}news\"/>\n");
     b.push_str(f"<updated>{updated}T00:00:00Z</updated>\n<author><name>DaminStudio</name></author>\n");
     for p in out {
@@ -211,13 +217,14 @@ pub fn feed(site: Site, posts: List<Post>, lang: str) -> str {
 }
 
 /// The home site's pages by output path (index, download, roadmap, faq
-/// and news/ from nabi-lang/www, their Korean editions from its ko/
-/// under `ko/`, and 404), their addresses for the sitemap, and the title
-/// of each page that has its own card. The landing page links into the
-/// newest docs with `docs:<path>` (a Korean page into the Korean docs);
-/// `latest` holds latest/'s pages, so an Error codes link shows only if
-/// those have them.
-pub fn pages(ref site: Site, own: List<Page>, ko_own: List<Page>, latest: Set<str>) throws -> (Dict<str, str>, List<(str, str)>, List<(str, str)>) {
+/// and news/ from nabi-lang/www, their editions in each other language
+/// from its `<lang>/` under `<lang>/`, a page not translated yet as the
+/// English one under a note, and 404), their addresses for the sitemap,
+/// and the title of each page that has its own card. The landing page
+/// links into the newest docs with `docs:<path>` (a page in another
+/// language into the docs in it); `latest` holds latest/'s pages, so an
+/// Error codes link shows only if those have them.
+pub fn pages(ref site: Site, eds: List<Ed>, latest: Set<str>) throws -> (Dict<str, str>, List<(str, str)>, List<(str, str)>) {
     let www: Dict<str, str> = Dict::new();
     let urls: List<(str, str)> = List::new();
     // When each source last changed, for the sitemap.
@@ -226,8 +233,22 @@ pub fn pages(ref site: Site, own: List<Page>, ko_own: List<Page>, latest: Set<st
     let docs_no_errors = site.no_errors;
     if latest.len() > 0 { site.no_errors = !latest.contains("errors/index.html"); }
     let sizes = release_sizes(site.release);
-    for (dir, group) in [("", own), ("ko/", ko_own)] {
-        let ko = !dir.is_empty();
+    // Which languages have each page (`download`, `news/x`) in their own
+    // words.
+    let real: Dict<str, List<Lang>> = Dict::new();
+    let names = ["index", "download", "roadmap", "faq", "news/index", "community", "governance", "brand", "privacy", "terms"].to_list();
+    for p in try posts(site, f"{site.www}/news", "") { names.push("news/" + p.name); }
+    for name in names {
+        let ls: List<Lang> = List::new();
+        for l in lang::ALL {
+            if fs::exists(f"{site.www}/{l.dir()}{name}.md") { ls.push(l); }
+        }
+        real.insert(name, ls);
+    }
+    for e in eds {
+        let group = e.own;
+        let l = e.lang;
+        let dir = l.dir();
         let examples: List<home::Example> = List::new();
         for p in group {
             let at = p.out.strip_prefix(dir) ?? p.out;
@@ -235,45 +256,96 @@ pub fn pages(ref site: Site, own: List<Page>, ko_own: List<Page>, latest: Set<st
                 examples.push(home::Example { title: p.title, lead: layout::lead_text(p.html), href: layout::latest(site, p.out) });
             }
         }
+        // A post not translated yet is listed in English.
         let news = try posts(site, f"{site.www}/{dir}news", dir);
+        if !l.is_en() {
+            let have: Set<str> = Set::new();
+            for p in news { have.insert(p.name); }
+            for p in try posts(site, f"{site.www}/news", "") {
+                if !have.contains(p.name) { news.push(p); }
+            }
+            news.sort_by(|a, b| (b.date + b.name).cmp(a.date + a.name));
+        }
+        // The release's announcement in this language: the landing
+        // page's link goes there.
         for name in ["index", "download", "roadmap", "faq", "news/index", "community", "governance", "brand", "privacy", "terms"] {
-            let path = f"{site.www}/{dir}{name}.md";
+            let own_path = f"{site.www}/{dir}{name}.md";
+            let mine = fs::exists(own_path);
+            let path = if mine { own_path } else { f"{site.www}/{name}.md" };
             if !fs::exists(path) { continue; }
-            let (title, html) = try render(site, path, dir);
+            let (title, html0) = try render(site, path, if mine { dir } else { "" });
+            let html = if mine { html0 } else { untranslated(html0, l) };
             let out = dir + name + ".html";
-            let body = if name == "index" { home::body(site, examples, sizes, ko) } else if name == "download" { download_page(html, sizes) } else if name == "news/index" { html + post_list(news, ko) } else { html };
+            let body = if name == "index" { home::body(site, examples, sizes, l, archives_id(site, l)) } else if name == "download" { download_page(html, sizes) } else if name == "news/index" { html + post_list(news, l) } else { html };
             if name != "index" { cards.push((out, title)); }
-            www.insert(out, layout::www_page(site, out, title, body));
-            // `/ko`, not `/ko/`, which 301s to it.
-            let at = if name == "index" { if ko { "/ko" } else { "/" } } else { "/" + dir + if name == "news/index" { "news" } else { name } };
+            let ls = real.get(name) ?? List::new();
+            www.insert(out, layout::www_page_with(site, out, title, body, if mine || l.is_en() { "" } else { NOINDEX }, ls));
+            // `/ko`, not `/ko/`, which 301s to it; a page still in
+            // English stays out.
+            if !mine && !l.is_en() { continue; }
+            let at = if name == "index" { "/" + l.slug() } else { "/" + dir + if name == "news/index" { "news" } else { name } };
             urls.push((site.base_url + at, upd.get(dir + name + ".md") ?? ""));
         }
         www.insert(dir + "news/feed.xml", feed(site, news, dir));
         // Releases: one page per toolchain version, from its CHANGELOG.md.
         let rels = releases(site.library + "/../CHANGELOG.md");
         if rels.len() > 0 {
-            let title = tr(ko, "Releases", "릴리스");
-            www.insert(dir + "releases/index.html", layout::www_page(site, dir + "releases/index.html", title, release_list(rels, ko)));
+            let title = l.words().releases;
+            www.insert(dir + "releases/index.html", layout::www_page(site, dir + "releases/index.html", title, release_list(rels, l)));
             urls.push((f"{site.base_url}/{dir}releases", if rels[0].date.starts_with("2") { rels[0].date } else { "" }));
             for r in rels {
                 let out = f"{dir}releases/{r.version}.html";
-                // The notes are English; the Korean page shows them under a
-                // note and stays out of search engines.
-                let more = if ko { "<meta name=\"robots\" content=\"noindex\">\n" } else { "" };
-                www.insert(out, layout::www_page_with(site, out, f"Nabi {r.version}", release_page(site, r, ko, f"{site.www}/{dir}news/nabi-{r.version}.md"), more));
-                if !ko { urls.push((f"{site.base_url}/releases/{r.version}", r.date)); }
+                // The notes are English; a page in another language shows
+                // them under a note and stays out of search engines.
+                let more = if l.is_en() { "" } else { NOINDEX };
+                www.insert(out, layout::www_page_with(site, out, f"Nabi {r.version}", release_page(site, r, l, f"{site.www}/{dir}news/nabi-{r.version}.md"), more, RELEASE_LANGS.to_list()));
+                if l.is_en() { urls.push((f"{site.base_url}/releases/{r.version}", r.date)); }
             }
         }
         for p in news {
             let out = f"{dir}news/{p.name}.html";
-            www.insert(out, layout::www_page(site, out, p.title, after_h1(p.html, dated(p, ko))));
+            let mine = l.is_en() || fs::exists(f"{site.www}/{dir}news/{p.name}.md");
+            let html = if mine { p.html } else { untranslated(p.html, l) };
+            let ls = real.get("news/" + p.name) ?? [Lang::En].to_list();
+            www.insert(out, layout::www_page_with(site, out, p.title, after_h1(html, dated(p, l)), if mine { "" } else { NOINDEX }, ls));
             // A post goes into the sitemap once it is out.
-            if p.date.starts_with("2") { urls.push((f"{site.base_url}/{dir}news/{p.name}", upd.get(f"{dir}news/{p.name}.md") ?? p.date)); }
+            if mine && p.date.starts_with("2") { urls.push((f"{site.base_url}/{dir}news/{p.name}", upd.get(f"{dir}news/{p.name}.md") ?? p.date)); }
         }
     }
-    www.insert("404.html", layout::www_page(site, "404.html", "Page not found", layout::not_found(|p| layout::latest(site, p), false, site.no_errors)));
+    www.insert("404.html", layout::www_page(site, "404.html", "Page not found", layout::not_found(|p| layout::latest(site, p), Lang::En, site.no_errors)));
     site.no_errors = docs_no_errors;
     (www, urls, cards)
+}
+
+/// The release pages' hreflang links: English and Korean, as before
+/// there were more languages (the notes are English).
+const RELEASE_LANGS: [Lang; 2] = [Lang::En, Lang::Ko];
+
+const NOINDEX: str = "<meta name=\"robots\" content=\"noindex\">\n";
+
+/// `html`, a page of www in English, as the page in `l` until it is
+/// translated: under a note, marked English. Its `<h1>` stays first.
+fn untranslated(html: str, l: Lang) -> str {
+    let k = html.find("</h1>") ?? return layout::untranslated(l) + "<div lang=\"en\">\n" + html + "</div>\n";
+    // the title as well: the reader sees it is English
+    let h = html[:k + 5];
+    let o = h.find("<h1") ?? 0;
+    h = h[:o + 3] + " lang=\"en\"" + h[o + 3:];
+    h + "\n" + layout::untranslated(l) + "<div lang=\"en\">\n" + html[k + 5:] + "</div>\n"
+}
+
+/// The id the download page in `l` gives its Archives section (the
+/// landing page links to it): the heading in the place English has
+/// `archives`.
+pub fn archives_id(site: Site, l: Lang) -> str {
+    let path = f"{site.www}/{l.dir()}download.md";
+    if l.is_en() || !fs::exists(path) { return "archives"; }
+    let en = try render_doc(site, f"{site.www}/download.md", "") catch _ { return "archives"; };
+    let mine = try render_doc(site, path, l.dir()) catch _ { return "archives"; };
+    for k in 0..en.headings.len() {
+        if en.headings[k].id == "archives" && k < mine.headings.len() { return mine.headings[k].id; }
+    }
+    "archives"
 }
 
 /// A toolchain release as CHANGELOG.md has it: `## <version> (<date>)`,
@@ -327,12 +399,13 @@ pub fn releases(path: str) -> List<Release> {
 
 /// releases/index.html: every release, newest first, with its date and
 /// summary.
-pub fn release_list(rels: List<Release>, ko: bool) -> str {
+pub fn release_list(rels: List<Release>, l: Lang) -> str {
     let b = StrBuf::new();
-    b.push_str(f"<h1>{tr(ko, "Releases", "릴리스")}</h1>\n<div class=\"lead-sm\">{tr(ko, "Every release of the Nabi toolchain, newest first, with its notes from <a href=\"https://github.com/nabi-lang/nabi/blob/main/CHANGELOG.md\">CHANGELOG.md</a>. Before 1.0 the minor version is the breaking slot; only the latest series gets fixes.", "Nabi 툴체인의 모든 릴리스를 새것부터 적었습니다. 노트는 <a href=\"https://github.com/nabi-lang/nabi/blob/main/CHANGELOG.md\">CHANGELOG.md</a>에서 가져오며 영어로 씁니다. 1.0 전에는 부 버전이 호환을 깨는 자리이고, 수정은 가장 최근 계열에만 나옵니다.")}</div>\n<ul class=\"posts\">");
+    let cl = "<a href=\"https://github.com/nabi-lang/nabi/blob/main/CHANGELOG.md\">CHANGELOG.md</a>";
+    b.push_str(f"<h1>{l.words().releases}</h1>\n<div class=\"lead-sm\">{tr(l, f"Every release of the Nabi toolchain, newest first, with its notes from {cl}. Before 1.0 the minor version is the breaking slot; only the latest series gets fixes.", f"Nabi 툴체인의 모든 릴리스를 새것부터 적었습니다. 노트는 {cl}에서 가져오며 영어로 씁니다. 1.0 전에는 부 버전이 호환을 깨는 자리이고, 수정은 가장 최근 계열에만 나옵니다.", f"Nabi 工具链的所有版本，从新到旧排列。发布说明取自 {cl}，只有英文版。1.0 之前，次版本号的变化意味着不兼容的改动；只有最新的版本系列会得到修复。", f"Nabi 工具鏈的所有版本，由新到舊排列。發行說明取自 {cl}，只有英文版。1.0 之前，次版本號的變動代表不相容的變更；只有最新的版本系列會獲得修正。")}</div>\n<ul class=\"posts\">");
     for r in rels {
         let sum = if r.summary.is_empty() { "" } else { f"<p lang=\"en\">{markdown::esc(r.summary)}</p>" };
-        b.push_str(f"<li><a href=\"{markdown::esc(r.version)}.html\">Nabi {markdown::esc(r.version)}</a> <p class=\"post-date\"><time datetime=\"{markdown::esc(r.date)}\">{layout::long_date(r.date, ko)}</time></p>{sum}</li>");
+        b.push_str(f"<li><a href=\"{markdown::esc(r.version)}.html\">Nabi {markdown::esc(r.version)}</a> <p class=\"post-date\"><time datetime=\"{markdown::esc(r.date)}\">{layout::long_date(r.date, l)}</time></p>{sum}</li>");
     }
     b.push_str("</ul>\n");
     b.to_str()
@@ -341,12 +414,12 @@ pub fn release_list(rels: List<Release>, ko: bool) -> str {
 /// releases/<version>.html: the release's date, its summary and notes,
 /// and where to get it; `post` is its announcement's source, linked when
 /// there.
-pub fn release_page(_site: Site, r: Release, ko: bool, post: str) -> str {
-    let notes = layout::md(r.notes, |h| h, false).html;
-    let ann = if fs::exists(post) { f" <a href=\"../news/nabi-{markdown::esc(r.version)}.html\">{tr(ko, "Announcement", "발표")}</a>" } else { "" };
-    let note = if ko { "<p class=\"note\">릴리스 노트는 영어로만 씁니다.</p>\n" } else { "" };
+pub fn release_page(_site: Site, r: Release, l: Lang, post: str) -> str {
+    let notes = layout::md(r.notes, |h| h, Lang::En).html;
+    let ann = if fs::exists(post) { f" <a href=\"../news/nabi-{markdown::esc(r.version)}.html\">{tr(l, "Announcement", "발표", "发布公告", "發布公告")}</a>" } else { "" };
+    let note = if l.is_en() { "" } else { f"<p class=\"note\">{tr(l, "", "릴리스 노트는 영어로만 씁니다.", "发布说明只有英文版。", "發行說明只有英文版。")}</p>\n" };
     let sum = if r.summary.is_empty() { "" } else { f"<p class=\"lead-sm\" lang=\"en\">{markdown::esc(r.summary)}</p>\n" };
-    f"<h1>Nabi {markdown::esc(r.version)}</h1>\n<p class=\"post-date\"><time datetime=\"{markdown::esc(r.date)}\">{layout::long_date(r.date, ko)}</time></p>\n{note}{sum}<div lang=\"en\">{pkg::home::refs(notes)}</div>\n<p><a href=\"https://github.com/nabi-lang/nabi/releases/tag/v{markdown::esc(r.version)}\">{tr(ko, "Release on GitHub", "GitHub 릴리스")}</a>{ann} <a href=\"../download.html\">{tr(ko, "Download", "내려받기")}</a> <a href=\"index.html\">{tr(ko, "All releases", "모든 릴리스")}</a></p>\n"
+    f"<h1>Nabi {markdown::esc(r.version)}</h1>\n<p class=\"post-date\"><time datetime=\"{markdown::esc(r.date)}\">{layout::long_date(r.date, l)}</time></p>\n{note}{sum}<div lang=\"en\">{pkg::home::refs(notes)}</div>\n<p><a href=\"https://github.com/nabi-lang/nabi/releases/tag/v{markdown::esc(r.version)}\">{tr(l, "Release on GitHub", "GitHub 릴리스", "GitHub 上的版本", "GitHub 上的版本")}</a>{ann} <a href=\"../download.html\">{tr(l, "Download", "내려받기", "下载", "下載")}</a> <a href=\"index.html\">{tr(l, "All releases", "모든 릴리스", "所有版本", "所有版本")}</a></p>\n"
 }
 
 /// The home site written into `dir`: `pages` (www::pages) with canonical
@@ -405,7 +478,7 @@ fn changelog_releases() {
     assert(rs.len() == 2 && rs[0].version == "0.1.1" && rs[0].date == "2026-11-22" && rs[0].summary == "A fix release." && rs[0].notes.starts_with("## Highlights") && !rs[0].notes.contains("<!--"), rs[0].notes);
     assert(rs[1].version == "0.1.0" && rs[1].notes == "- first", "oldest");
     let site = Site { title: "", tagline: "", spec_repo: "", packages: "" };
-    let page = release_page(site, rs[0], false, "nope.md");
+    let page = release_page(site, rs[0], Lang::En, "nope.md");
     assert(page.contains("<h1>Nabi 0.1.1</h1>") && page.contains("issues/11") && page.contains("releases/tag/v0.1.1") && !page.contains("Announcement"), page);
-    assert(release_list(rs, true).contains("<a href=\"0.1.0.html\">Nabi 0.1.0</a>"), "list");
+    assert(release_list(rs, Lang::Ko).contains("<a href=\"0.1.0.html\">Nabi 0.1.0</a>"), "list");
 }

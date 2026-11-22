@@ -6,6 +6,7 @@ use pkg::layout::tr;
 use core::encoding;
 use markdown::esc;
 use std::fs;
+use web::lang::Lang;
 
 /// A program from the docs' examples.
 pub struct Example {
@@ -80,7 +81,7 @@ pub fn refs(html: str) -> str {
 
 /// Inline markdown, without the paragraph.
 fn inline(s: str) -> str {
-    let h = layout::md(s, |x| x, false).html.trim();
+    let h = layout::md(s, |x| x, Lang::En).html.trim();
     if h.starts_with("<p>") && h.ends_with("</p>") { h[3:h.len() - 4] } else { h }
 }
 
@@ -138,54 +139,59 @@ fn transcript(out: str, docs: fn(str) -> str) -> str {
     "<span class=\"p\">$</span> nabi run\n" + body
 }
 
-/// The playground with `src` in its editor (its Korean pages for `ko`):
-/// `#src=` and the source as base64url, which every browser opens;
-/// search.js swaps in the shorter deflated `#code=` where it can.
-fn play_link(site: Site, src: str, ko: bool) -> str { site.playground + (if ko { "/ko" } else { "/" }) + "#src=" + encoding::base64::encode(src, encoding::base64::URL_SAFE_NO_PAD) }
+/// The playground with `src` in its editor (its pages in `l`): `#src=`
+/// and the source as base64url, which every browser opens; search.js
+/// swaps in the shorter deflated `#code=` where it can.
+fn play_link(site: Site, src: str, l: Lang) -> str { site.playground + "/" + l.slug() + "#src=" + encoding::base64::encode(src, encoding::base64::URL_SAFE_NO_PAD) }
 
 /// A program and what nabic says about it: the code with the reported
 /// line marked, then the terminal, a figure whose caption (for screen
 /// readers) says what it shows; aria-label on a <pre> is not read.
-fn program(site: Site, s: Sample, docs: fn(str) -> str, label: str, ko: bool) -> str {
+fn program(site: Site, s: Sample, docs: fn(str) -> str, label: str, l: Lang) -> str {
     let hl = error_line(s.out);
-    let play = f"<a class=\"btn-2 btn-sm play\" href=\"{esc(play_link(site, s.src, ko))}\" aria-label=\"{tr(ko, "Run src/main.nabi in the playground", "플레이그라운드에서 src/main.nabi 실행")}\">{tr(ko, "Run", "실행")} ↗</a>";
+    let play = f"<a class=\"btn-2 btn-sm play\" href=\"{esc(play_link(site, s.src, l))}\" aria-label=\"{tr(l, "Run src/main.nabi in the playground", "플레이그라운드에서 src/main.nabi 실행", "在演练场中运行 src/main.nabi", "在演練場中執行 src/main.nabi")}\">{tr(l, "Run", "실행", "运行", "執行")} ↗</a>";
     f"<div class=\"cb prog\"><div class=\"cb-h\"><span class=\"t-label\">src/main.nabi</span>{play}</div><pre class=\"pre\"><code>{numbered(s.src, hl)}</code></pre></div>
 <figure class=\"term-fig\"><div class=\"term-bar\" aria-hidden=\"true\">~/{s.name}</div><pre class=\"term\">{transcript(s.out, docs)}</pre><figcaption class=\"sr-only\">{label}</figcaption></figure>"
 }
 
-fn feature(site: Site, title: str, text: str, link: str, label: str, s: Sample, docs: fn(str) -> str, ko: bool) -> str {
-    f"<div class=\"feat\"><div class=\"feat-t\"><h3 class=\"t-h3\">{title}</h3><p>{text}</p><a class=\"t-ui\" href=\"{esc(link)}\">{label}</a></div><div class=\"feat-f\">{program(site, s, docs, tr(ko, "nabi run in a terminal: what nabic reports for this program", "터미널의 nabi run: 이 프로그램에 대해 nabic이 알려 주는 내용"), ko)}</div></div>\n"
+fn feature(site: Site, title: str, text: str, link: str, label: str, s: Sample, docs: fn(str) -> str, l: Lang) -> str {
+    f"<div class=\"feat\"><div class=\"feat-t\"><h3 class=\"t-h3\">{title}</h3><p>{text}</p><a class=\"t-ui\" href=\"{esc(link)}\">{label}</a></div><div class=\"feat-f\">{program(site, s, docs, tr(l, "nabi run in a terminal: what nabic reports for this program", "터미널의 nabi run: 이 프로그램에 대해 nabic이 알려 주는 내용", "终端里的 nabi run：nabic 对这个程序的报告", "終端機裡的 nabi run：nabic 對這個程式的回報"), l)}</div></div>\n"
 }
 
 /// The install commands: the shell script, the PowerShell one.
 const SH: str = "curl -fsSL https://nabi.sh | sh";
 const PS: str = "powershell -ExecutionPolicy Bypass -c \"irm https://nabi.sh/install.ps1 | iex\"";
 
-/// The release archives: (system, triple, note, Korean note, extension).
-const ARCHIVES: [(str, str, str, str, str); 8] = [
-    ("macOS", "aarch64-apple-darwin", "Apple silicon", "Apple 실리콘", ".tar.xz"),
-    ("Windows", "x86_64-pc-windows-msvc", "x64, Windows 11", "x64, Windows 11", ".zip"),
-    ("Windows", "aarch64-pc-windows-msvc", "arm64, Windows 11", "arm64, Windows 11", ".zip"),
-    ("Linux", "x86_64-unknown-linux-gnu", "glibc 2.34 or later", "glibc 2.34 이상", ".tar.xz"),
-    ("Linux", "aarch64-unknown-linux-gnu", "glibc 2.34 or later", "glibc 2.34 이상", ".tar.xz"),
-    ("Linux", "x86_64-unknown-linux-musl", "static, any distribution", "정적 링크, 모든 배포판", ".tar.xz"),
-    ("Linux", "aarch64-unknown-linux-musl", "static, any distribution", "정적 링크, 모든 배포판", ".tar.xz"),
-    ("FreeBSD", "x86_64-unknown-freebsd", "FreeBSD 14 or later", "FreeBSD 14 이상", ".tar.xz"),
+/// The release archives: (system, triple, extension, note in each
+/// language: English, Korean, zh-Hans, zh-Hant).
+const ARCHIVES: [(str, str, str, [str; 4]); 8] = [
+    ("macOS", "aarch64-apple-darwin", ".tar.xz", ["Apple silicon", "Apple 실리콘", "Apple 芯片", "Apple 晶片"]),
+    ("Windows", "x86_64-pc-windows-msvc", ".zip", ["x64, Windows 11", "x64, Windows 11", "x64，Windows 11", "x64，Windows 11"]),
+    ("Windows", "aarch64-pc-windows-msvc", ".zip", ["arm64, Windows 11", "arm64, Windows 11", "arm64，Windows 11", "arm64，Windows 11"]),
+    ("Linux", "x86_64-unknown-linux-gnu", ".tar.xz", ["glibc 2.34 or later", "glibc 2.34 이상", "glibc 2.34 及以上", "glibc 2.34 以上"]),
+    ("Linux", "aarch64-unknown-linux-gnu", ".tar.xz", ["glibc 2.34 or later", "glibc 2.34 이상", "glibc 2.34 及以上", "glibc 2.34 以上"]),
+    ("Linux", "x86_64-unknown-linux-musl", ".tar.xz", ["static, any distribution", "정적 링크, 모든 배포판", "静态链接，适用于任何发行版", "靜態連結，適用於任何發行版"]),
+    ("Linux", "aarch64-unknown-linux-musl", ".tar.xz", ["static, any distribution", "정적 링크, 모든 배포판", "静态链接，适用于任何发行版", "靜態連結，適用於任何發行版"]),
+    ("FreeBSD", "x86_64-unknown-freebsd", ".tar.xz", ["FreeBSD 14 or later", "FreeBSD 14 이상", "FreeBSD 14 及以上", "FreeBSD 14 以上"]),
 ];
 
-/// The packages the landing page names, each with what it is for.
-const OFFICIAL: [(str, str, str); 10] = [
-    ("json", "JSON", "JSON"),
-    ("http", "HTTP client and server", "HTTP 클라이언트와 서버"),
-    ("regex", "regular expressions", "정규 표현식"),
-    ("toml", "TOML", "TOML"),
-    ("table", "data frames, CSV, Parquet", "데이터 프레임, CSV, Parquet"),
-    ("stats", "statistics", "통계"),
-    ("linalg", "linear algebra", "선형대수"),
-    ("plot", "SVG and PNG plots", "SVG와 PNG 그래프"),
-    ("optimize", "fitting and optimization", "피팅과 최적화"),
-    ("ode", "differential equations", "미분방정식"),
+/// The packages the landing page names, each with what it is for in
+/// each language.
+const OFFICIAL: [(str, [str; 4]); 10] = [
+    ("json", ["JSON", "JSON", "JSON", "JSON"]),
+    ("http", ["HTTP client and server", "HTTP 클라이언트와 서버", "HTTP 客户端和服务器", "HTTP 用戶端與伺服器"]),
+    ("regex", ["regular expressions", "정규 표현식", "正则表达式", "正規表示式"]),
+    ("toml", ["TOML", "TOML", "TOML", "TOML"]),
+    ("table", ["data frames, CSV, Parquet", "데이터 프레임, CSV, Parquet", "数据框、CSV、Parquet", "資料框、CSV、Parquet"]),
+    ("stats", ["statistics", "통계", "统计", "統計"]),
+    ("linalg", ["linear algebra", "선형대수", "线性代数", "線性代數"]),
+    ("plot", ["SVG and PNG plots", "SVG와 PNG 그래프", "SVG 和 PNG 图表", "SVG 與 PNG 圖表"]),
+    ("optimize", ["fitting and optimization", "피팅과 최적화", "拟合与优化", "擬合與最佳化"]),
+    ("ode", ["differential equations", "미분방정식", "微分方程", "微分方程"]),
 ];
+
+/// `t` in `l`: English, Korean, zh-Hans, zh-Hant.
+fn of(l: Lang, t: [str; 4]) -> str { tr(l, t[0], t[1], t[2], t[3]) }
 
 /// The source of the landing page's package example.
 const PKG_SRC: str = "use json::parse;
@@ -195,33 +201,35 @@ println(v.get(\"lang\")?.as_str() ?? \"\");";
 
 /// Using a package: an official one comes with the toolchain and is
 /// added on first use; any other is one `nabi add` away.
-fn packages(site: Site, docs: fn(str) -> str, ko: bool) -> str {
+fn packages(site: Site, docs: fn(str) -> str, l: Lang) -> str {
     let out = StrBuf::new();
     let list = StrBuf::new();
-    for (name, en, kr) in OFFICIAL {
-        list.push_str(f"<li><a class=\"mono\" href=\"{esc(site.packages)}/packages/{name}\">{name}</a> <span>{tr(ko, en, kr)}</span></li>");
+    for (name, what) in OFFICIAL {
+        list.push_str(f"<li><a class=\"mono\" href=\"{esc(site.packages)}/packages/{name}\">{name}</a> <span>{of(l, what)}</span></li>");
     }
-    let text = tr(ko,
+    let text = tr(l,
         "The packages the Nabi project publishes come with the toolchain: JSON and HTTP, tables, statistics, plots and more. Write <code class=\"ic\">use</code> and run; <code class=\"ic\">nabi</code> adds the package to your manifest, with no download and no network. Anything else on the registry is one <code class=\"ic\">nabi add &lt;name&gt;</code> away.",
-        "Nabi 프로젝트가 내는 패키지는 툴체인과 함께 설치됩니다. JSON과 HTTP, 표, 통계, 그래프 등이 있습니다. <code class=\"ic\">use</code>를 쓰고 실행하면 <code class=\"ic\">nabi</code>가 패키지를 매니페스트에 넣어 줍니다. 내려받기도 네트워크도 필요 없습니다. 레지스트리의 다른 패키지는 <code class=\"ic\">nabi add &lt;이름&gt;</code> 한 줄이면 됩니다.");
+        "Nabi 프로젝트가 내는 패키지는 툴체인과 함께 설치됩니다. JSON과 HTTP, 표, 통계, 그래프 등이 있습니다. <code class=\"ic\">use</code>를 쓰고 실행하면 <code class=\"ic\">nabi</code>가 패키지를 매니페스트에 넣어 줍니다. 내려받기도 네트워크도 필요 없습니다. 레지스트리의 다른 패키지는 <code class=\"ic\">nabi add &lt;이름&gt;</code> 한 줄이면 됩니다.",
+        "Nabi 项目发布的包随工具链一起安装：JSON 和 HTTP、表格、统计、图表等。写下 <code class=\"ic\">use</code> 然后运行，<code class=\"ic\">nabi</code> 就会把包加入清单，无需下载，也无需联网。注册表上的其他包，一条 <code class=\"ic\">nabi add &lt;名称&gt;</code> 即可添加。",
+        "Nabi 專案發布的套件會隨工具鏈一併安裝：JSON 與 HTTP、表格、統計、圖表等。寫下 <code class=\"ic\">use</code> 再執行，<code class=\"ic\">nabi</code> 就會把套件加進清單，不必下載，也不必連網。套件庫上的其他套件，只要一行 <code class=\"ic\">nabi add &lt;名稱&gt;</code>。");
     let term = f"<span class=\"p\">$</span> nabi run main.nabi\n<span class=\"g\">       Added</span> json ^0.1 (official)\nnabi";
     out.push_str(f"<section class=\"pkgs\"><div class=\"frame\">
-<div class=\"feat-t\"><h2 class=\"t-h2\">{tr(ko, "Using a package", "패키지 쓰기")}</h2><p>{text}</p>
+<div class=\"feat-t\"><h2 class=\"t-h2\">{tr(l, "Using a package", "패키지 쓰기", "使用包", "使用套件")}</h2><p>{text}</p>
 <ul class=\"pkg-list\">{list.to_str()}</ul>
-<p class=\"links\"><a class=\"t-ui\" href=\"{esc(site.packages)}\">{tr(ko, "Browse packages.nabi-lang.org", "packages.nabi-lang.org 둘러보기")}</a> <a class=\"t-ui\" href=\"{docs("learn/11-modules-packages.html")}\">{tr(ko, "Guide, chapter 11: Modules and Packages", "가이드 11장: 모듈과 패키지")}</a></p></div>
+<p class=\"links\"><a class=\"t-ui\" href=\"{esc(site.packages)}\">{tr(l, "Browse packages.nabi-lang.org", "packages.nabi-lang.org 둘러보기", "浏览 packages.nabi-lang.org", "瀏覽 packages.nabi-lang.org")}</a> <a class=\"t-ui\" href=\"{docs("learn/11-modules-packages.html")}\">{tr(l, "Guide, chapter 11: Modules and Packages", "가이드 11장: 모듈과 패키지", "指南第 11 章：模块与包", "指南第 11 章：模組與套件")}</a></p></div>
 <div class=\"feat-f\"><div class=\"cb prog\"><div class=\"cb-h\"><span class=\"t-label\">main.nabi</span></div><pre class=\"pre\"><code>{nabi_syntax::highlight_nabi(PKG_SRC)}</code></pre></div>
-<figure class=\"term-fig\"><div class=\"term-bar\" aria-hidden=\"true\">~/app</div><pre class=\"term\">{term}</pre><figcaption class=\"sr-only\">{tr(ko, "nabi run in a terminal: json is added as an official package, then the program prints nabi", "터미널의 nabi run: json이 공식 패키지로 추가되고, 프로그램이 nabi를 출력합니다")}</figcaption></figure></div>
+<figure class=\"term-fig\"><div class=\"term-bar\" aria-hidden=\"true\">~/app</div><pre class=\"term\">{term}</pre><figcaption class=\"sr-only\">{tr(l, "nabi run in a terminal: json is added as an official package, then the program prints nabi", "터미널의 nabi run: json이 공식 패키지로 추가되고, 프로그램이 nabi를 출력합니다", "终端里的 nabi run：json 作为官方包被加入，然后程序输出 nabi", "終端機裡的 nabi run：json 以官方套件加入，接著程式印出 nabi")}</figcaption></figure></div>
 </div></section>
 ");
     out.to_str()
 }
 
-/// The landing page's body, in Korean when `ko`. `examples` are the
-/// docs' examples; the release notes come from the toolchain's
-/// CHANGELOG.md, if present.
-pub fn body(site: Site, examples: List<Example>, sizes: Dict<str, i64>, ko: bool) -> str {
+/// The landing page's body in `l`. `examples` are the docs' examples;
+/// the release notes come from the toolchain's CHANGELOG.md, if present.
+/// `archives` is the id of the download page's Archives section in `l`.
+pub fn body(site: Site, examples: List<Example>, sizes: Dict<str, i64>, l: Lang, archives: str) -> str {
     let r = site.release;
-    let lang = if ko { "ko/" } else { "" };
+    let lang = l.dir();
     let docs = |p: str| esc(layout::latest(site, lang + p));
     let rel_url = f"https://github.com/nabi-lang/nabi/releases/tag/v{r}";
     let n = news(site.library + "/../CHANGELOG.md", r);
@@ -232,40 +240,41 @@ pub fn body(site: Site, examples: List<Example>, sizes: Dict<str, i64>, ko: bool
     // A dated changelog section means the release is out; before that
     // the section reads `(unreleased)`.
     let came = if let x: News = n {
-        if x.date.starts_with("2") { tr(ko, f"Nabi {r} came out on {layout::long_date(x.date, false)}", f"Nabi {r} 출시, {layout::long_date(x.date, true)}") } else { tr(ko, f"Nabi {r}, not released yet", f"Nabi {r}, 아직 나오지 않음") }
+        let d = layout::long_date(x.date, l);
+        if x.date.starts_with("2") { tr(l, f"Nabi {r} came out on {d}", f"Nabi {r} 출시, {d}", f"Nabi {r} 已于 {d} 发布", f"Nabi {r} 已於 {d} 發布") } else { tr(l, f"Nabi {r}, not released yet", f"Nabi {r}, 아직 나오지 않음", f"Nabi {r} 尚未发布", f"Nabi {r} 尚未發布") }
     } else { f"Nabi {r}" };
     // The slogan breaks after its comma, the second half in the accent.
-    let tagline = if ko { layout::TAGLINE_KO } else { site.tagline };
-    let title = if tagline.is_empty() { "Nabi" } else if let (a, b): (str, str) = tagline.split_once(", ") { f"{esc(a)},<br><span class=\"acc\">{esc(b)}</span>" } else { esc(tagline) };
+    let tagline = layout::tagline(site, l);
+    let title = if tagline.is_empty() { "Nabi" } else if let (a, b): (str, str) = tagline.split_once(", ") { f"{esc(a)},<br><span class=\"acc\">{esc(b)}</span>" } else if let (a, b): (str, str) = tagline.split_once("，") { f"{esc(a)}，<br><span class=\"acc\">{esc(b)}</span>" } else { esc(tagline) };
     out.push_str(f"<section class=\"hero\"><div class=\"frame\">
 <div class=\"hero-t\">
 <a class=\"t-ui news-link mono\" href=\"{rel_url}\">{came} →</a>
 <h1 class=\"t-display\">{title}</h1>
-<p class=\"t-lead\">{tr(ko, "A compiled language with closed sum types, no null, and errors in the signature.", "닫힌 합 타입, null 없음, 시그니처에 드러나는 에러를 갖춘 컴파일 언어.")}</p>
+<p class=\"t-lead\">{tr(l, "A compiled language with closed sum types, no null, and errors in the signature.", "닫힌 합 타입, null 없음, 시그니처에 드러나는 에러를 갖춘 컴파일 언어.", "一门编译型语言：封闭的和类型，没有 null，错误写在签名里。", "一種編譯式語言：封閉的和型別，沒有 null，錯誤寫在簽章裡。")}</p>
 <div class=\"install\" data-os-pick>
-<div class=\"os-pick\" role=\"group\" aria-label=\"{tr(ko, "Install command for", "설치 명령: 운영체제")}\"><button type=\"button\" data-pick=\"unix\" aria-pressed=\"true\">macOS, Linux, FreeBSD</button><button type=\"button\" data-pick=\"windows\" aria-pressed=\"false\">Windows</button></div>
+<div class=\"os-pick\" role=\"group\" aria-label=\"{tr(l, "Install command for", "설치 명령: 운영체제", "安装命令：操作系统", "安裝指令：作業系統")}\"><button type=\"button\" data-pick=\"unix\" aria-pressed=\"true\">macOS, Linux, FreeBSD</button><button type=\"button\" data-pick=\"windows\" aria-pressed=\"false\">Windows</button></div>
 <div class=\"os\" data-for=\"unix\">
-<div class=\"line mono\"><code><span class=\"c\">$</span> {esc(SH)}</code>{web::chrome::copy_button(SH, ko)}</div>
-<p class=\"t-small\">{tr(ko, "macOS (Apple silicon), Linux and FreeBSD. Or <a href=\"download.html#archives\">an archive</a>.", "macOS(Apple 실리콘), Linux, FreeBSD. 또는 <a href=\"download.html#압축-파일\">압축 파일</a>.")}</p>
+<div class=\"line mono\"><code><span class=\"c\">$</span> {esc(SH)}</code>{web::chrome::copy_button_for(SH, l)}</div>
+<p class=\"t-small\">{tr(l, f"macOS (Apple silicon), Linux and FreeBSD. Or <a href=\"download.html#{archives}\">an archive</a>.", f"macOS(Apple 실리콘), Linux, FreeBSD. 또는 <a href=\"download.html#{archives}\">압축 파일</a>.", f"macOS（Apple 芯片）、Linux 和 FreeBSD。也可以下载<a href=\"download.html#{archives}\">压缩包</a>。", f"macOS（Apple 晶片）、Linux 與 FreeBSD。也可以下載<a href=\"download.html#{archives}\">壓縮檔</a>。")}</p>
 </div>
 <div class=\"os\" data-for=\"windows\" hidden>
-<div class=\"line mono\"><code><span class=\"c\">&gt;</span> powershell -ExecutionPolicy Bypass <span class=\"nw\">-c \"irm https://nabi.sh/install.ps1 | iex\"</span></code>{web::chrome::copy_button(PS, ko)}</div>
-<p class=\"t-small\">{tr(ko, "Windows on x64 or arm64, in PowerShell. Or <a href=\"download.html#archives\">an archive</a>.", "x64 또는 arm64 Windows, PowerShell에서. 또는 <a href=\"download.html#압축-파일\">압축 파일</a>.")}</p>
+<div class=\"line mono\"><code><span class=\"c\">&gt;</span> powershell -ExecutionPolicy Bypass <span class=\"nw\">-c \"irm https://nabi.sh/install.ps1 | iex\"</span></code>{web::chrome::copy_button_for(PS, l)}</div>
+<p class=\"t-small\">{tr(l, f"Windows on x64 or arm64, in PowerShell. Or <a href=\"download.html#{archives}\">an archive</a>.", f"x64 또는 arm64 Windows, PowerShell에서. 또는 <a href=\"download.html#{archives}\">압축 파일</a>.", f"x64 或 arm64 的 Windows，在 PowerShell 中运行。也可以下载<a href=\"download.html#{archives}\">压缩包</a>。", f"x64 或 arm64 的 Windows，在 PowerShell 中執行。也可以下載<a href=\"download.html#{archives}\">壓縮檔</a>。")}</p>
 </div>
 </div>
-<p class=\"go\"><a class=\"btn\" href=\"{docs("learn/index.html")}\">{tr(ko, "Read the guide", "가이드 읽기")}</a><a class=\"t-ui\" href=\"{esc(site.playground)}{if ko { "/ko" } else { "" }}\">{tr(ko, "or try it in the browser", "또는 브라우저에서 써 보기")}</a></p>
+<p class=\"go\"><a class=\"btn\" href=\"{docs("learn/index.html")}\">{tr(l, "Read the guide", "가이드 읽기", "阅读指南", "閱讀指南")}</a><a class=\"t-ui\" href=\"{esc(site.playground)}{if l.is_en() { "" } else { "/" + l.slug() }}\">{tr(l, "or try it in the browser", "또는 브라우저에서 써 보기", "或在浏览器中试用", "或在瀏覽器中試用")}</a></p>
 </div>
-<div class=\"hero-m\"><svg class=\"mark\" viewBox=\"0 0 64 64\" role=\"img\" aria-label=\"{tr(ko, "The Nabi mark", "Nabi 마크")}\"><g><path fill=\"#93356A\" stroke=\"#93356A\" d=\"M23 39 L30 5 L33 15 Z\"/><path fill=\"#C9518A\" stroke=\"#C9518A\" d=\"M23 39 L33 15 L36 25.1 Z\"/></g><g><path fill=\"#C9518A\" stroke=\"#C9518A\" d=\"M23 39 L44 39 L38.5 49 Z\"/><path fill=\"#93356A\" stroke=\"#93356A\" d=\"M23 39 L38.5 49 L33 59 Z\"/></g><g><path fill=\"#FBC6D9\" stroke=\"#FBC6D9\" d=\"M23 39 L52 8 L54 18.5 Z\"/><path fill=\"#C9518A\" stroke=\"#C9518A\" d=\"M23 39 L54 18.5 L56 29 Z\"/><path fill=\"#EC7FA9\" stroke=\"#EC7FA9\" d=\"M23 39 L56 29 L44 39 Z\"/></g><g><path fill=\"#C9518A\" stroke=\"#C9518A\" d=\"M8 55 L18 41 L23 39 Z\"/><path fill=\"#93356A\" stroke=\"#93356A\" d=\"M8 55 L23 39 L25 43 Z\"/></g></svg></div>
+<div class=\"hero-m\"><svg class=\"mark\" viewBox=\"0 0 64 64\" role=\"img\" aria-label=\"{tr(l, "The Nabi mark", "Nabi 마크", "Nabi 标志", "Nabi 標誌")}\"><g><path fill=\"#93356A\" stroke=\"#93356A\" d=\"M23 39 L30 5 L33 15 Z\"/><path fill=\"#C9518A\" stroke=\"#C9518A\" d=\"M23 39 L33 15 L36 25.1 Z\"/></g><g><path fill=\"#C9518A\" stroke=\"#C9518A\" d=\"M23 39 L44 39 L38.5 49 Z\"/><path fill=\"#93356A\" stroke=\"#93356A\" d=\"M23 39 L38.5 49 L33 59 Z\"/></g><g><path fill=\"#FBC6D9\" stroke=\"#FBC6D9\" d=\"M23 39 L52 8 L54 18.5 Z\"/><path fill=\"#C9518A\" stroke=\"#C9518A\" d=\"M23 39 L54 18.5 L56 29 Z\"/><path fill=\"#EC7FA9\" stroke=\"#EC7FA9\" d=\"M23 39 L56 29 L44 39 Z\"/></g><g><path fill=\"#C9518A\" stroke=\"#C9518A\" d=\"M8 55 L18 41 L23 39 Z\"/><path fill=\"#93356A\" stroke=\"#93356A\" d=\"M8 55 L23 39 L25 43 Z\"/></g></svg></div>
 </div></section>
 ");
 
-    out.push_str(f"<section class=\"feats\"><div class=\"frame\">\n<h2 class=\"t-h2\">{tr(ko, "What it checks for you", "컴파일러가 대신 확인하는 것")}</h2>\n");
-    out.push_str(feature(site, tr(ko, "Every case of a sum type", "합 타입의 모든 경우"), tr(ko, "A value is <code class=\"ic\">i32 | str | bool</code>, and <code class=\"ic\">match</code> has to handle all three. Leave one out, or add a variant later, and the compiler names the case no arm covers.", "값이 <code class=\"ic\">i32 | str | bool</code>이면 <code class=\"ic\">match</code>는 셋을 모두 다뤄야 합니다. 하나를 빠뜨리거나 나중에 경우를 더하면, 컴파일러가 어느 갈래도 다루지 않는 경우를 짚어 줍니다."), layout::latest(site, lang + "learn/05-sum-types.html"), tr(ko, "Guide, chapter 5: Sum Types and none", "가이드 5장: 합 타입과 none"), sample("describe"), to, ko));
-    out.push_str(feature(site, tr(ko, "Values that may be missing", "없을 수도 있는 값"), tr(ko, "There is no null. A value that might not be there has the type <code class=\"ic\">T?</code>, and you say what happens when it isn't: a default with <code class=\"ic\">??</code>, or a branch with <code class=\"ic\">if let</code>.", "null은 없습니다. 없을 수도 있는 값의 타입은 <code class=\"ic\">T?</code>이고, 없을 때 어떻게 할지 코드에 적습니다. <code class=\"ic\">??</code>로 기본값을 주거나 <code class=\"ic\">if let</code>으로 갈래를 나눕니다."), layout::latest(site, lang + "learn/05-sum-types.html#defaults-with--and-chaining-with-"), tr(ko, "Guide: defaults with ?? and ?.", "가이드: ??와 ?.로 기본값 주기"), sample("find"), to, ko));
-    out.push_str(feature(site, tr(ko, "Errors you can see coming", "미리 보이는 에러"), tr(ko, "A function that can fail says so with <code class=\"ic\">throws</code>, and every call to it is marked <code class=\"ic\">try</code>. Reading the code, you can see each place an error can come from.", "실패할 수 있는 함수는 <code class=\"ic\">throws</code>로 그렇다고 밝히고, 그 함수를 부르는 곳마다 <code class=\"ic\">try</code>가 붙습니다. 코드를 읽기만 해도 에러가 나올 수 있는 곳이 모두 보입니다."), layout::latest(site, lang + "learn/10-errors.html"), tr(ko, "Guide, chapter 10: Error Handling", "가이드 10장: 에러 처리"), sample("ages"), to, ko));
+    out.push_str(f"<section class=\"feats\"><div class=\"frame\">\n<h2 class=\"t-h2\">{tr(l, "What it checks for you", "컴파일러가 대신 확인하는 것", "编译器替你检查什么", "編譯器替你檢查什麼")}</h2>\n");
+    out.push_str(feature(site, tr(l, "Every case of a sum type", "합 타입의 모든 경우", "和类型的每一种情况", "和型別的每一種情況"), tr(l, "A value is <code class=\"ic\">i32 | str | bool</code>, and <code class=\"ic\">match</code> has to handle all three. Leave one out, or add a variant later, and the compiler names the case no arm covers.", "값이 <code class=\"ic\">i32 | str | bool</code>이면 <code class=\"ic\">match</code>는 셋을 모두 다뤄야 합니다. 하나를 빠뜨리거나 나중에 경우를 더하면, 컴파일러가 어느 갈래도 다루지 않는 경우를 짚어 줍니다.", "一个值的类型是 <code class=\"ic\">i32 | str | bool</code>，<code class=\"ic\">match</code> 就必须处理这三种情况。漏掉一种，或者以后再加一种，编译器都会指出哪种情况没有分支处理。", "一個值的型別是 <code class=\"ic\">i32 | str | bool</code>，<code class=\"ic\">match</code> 就必須處理這三種情況。漏掉一種，或日後再加一種，編譯器都會指出哪種情況沒有分支處理。"), layout::latest(site, lang + "learn/05-sum-types.html"), tr(l, "Guide, chapter 5: Sum Types and none", "가이드 5장: 합 타입과 none", "指南第 5 章：和类型与 none", "指南第 5 章：和型別與 none"), sample("describe"), to, l));
+    out.push_str(feature(site, tr(l, "Values that may be missing", "없을 수도 있는 값", "可能缺失的值", "可能不存在的值"), tr(l, "There is no null. A value that might not be there has the type <code class=\"ic\">T?</code>, and you say what happens when it isn't: a default with <code class=\"ic\">??</code>, or a branch with <code class=\"ic\">if let</code>.", "null은 없습니다. 없을 수도 있는 값의 타입은 <code class=\"ic\">T?</code>이고, 없을 때 어떻게 할지 코드에 적습니다. <code class=\"ic\">??</code>로 기본값을 주거나 <code class=\"ic\">if let</code>으로 갈래를 나눕니다.", "没有 null。可能不存在的值，类型是 <code class=\"ic\">T?</code>，值不存在时怎么办要写在代码里：用 <code class=\"ic\">??</code> 给出默认值，或用 <code class=\"ic\">if let</code> 分支处理。", "沒有 null。可能不存在的值，型別是 <code class=\"ic\">T?</code>，值不存在時怎麼辦要寫在程式碼裡：用 <code class=\"ic\">??</code> 給預設值，或用 <code class=\"ic\">if let</code> 分支處理。"), layout::latest(site, lang + "learn/05-sum-types.html#defaults-with--and-chaining-with-"), tr(l, "Guide: defaults with ?? and ?.", "가이드: ??와 ?.로 기본값 주기", "指南：用 ?? 和 ?. 给出默认值", "指南：用 ?? 與 ?. 給預設值"), sample("find"), to, l));
+    out.push_str(feature(site, tr(l, "Errors you can see coming", "미리 보이는 에러", "看得见的错误", "看得見的錯誤"), tr(l, "A function that can fail says so with <code class=\"ic\">throws</code>, and every call to it is marked <code class=\"ic\">try</code>. Reading the code, you can see each place an error can come from.", "실패할 수 있는 함수는 <code class=\"ic\">throws</code>로 그렇다고 밝히고, 그 함수를 부르는 곳마다 <code class=\"ic\">try</code>가 붙습니다. 코드를 읽기만 해도 에러가 나올 수 있는 곳이 모두 보입니다.", "可能失败的函数用 <code class=\"ic\">throws</code> 声明，每一处调用都要标上 <code class=\"ic\">try</code>。只读代码，就能看到每一个可能出错的地方。", "可能失敗的函式用 <code class=\"ic\">throws</code> 宣告，每一處呼叫都要標上 <code class=\"ic\">try</code>。只讀程式碼，就能看到每一個可能出錯的地方。"), layout::latest(site, lang + "learn/10-errors.html"), tr(l, "Guide, chapter 10: Error Handling", "가이드 10장: 에러 처리", "指南第 10 章：错误处理", "指南第 10 章：錯誤處理"), sample("ages"), to, l));
     out.push_str("</div></section>\n");
 
-    out.push_str(packages(site, docs, ko));
+    out.push_str(packages(site, docs, l));
 
     if examples.len() > 0 {
         let picked: List<Example> = List::new();
@@ -284,7 +293,7 @@ pub fn body(site: Site, examples: List<Example>, sizes: Dict<str, i64>, ko: bool
         }
         let n_ex = examples.len();
         out.push_str(f"<section class=\"progs\"><div class=\"frame\">
-<div><h2 class=\"t-h2\">{tr(ko, "Programs to read", "읽어 볼 프로그램")}</h2><p>{tr(ko, f"{n_ex} complete programs, each one built and run when the docs are checked.", f"완성된 프로그램 {n_ex}개. 문서를 검사할 때마다 하나하나 빌드하고 실행합니다.")}</p><a class=\"t-ui\" href=\"{docs("examples/index.html")}\">{tr(ko, f"All {n_ex} examples", f"예제 {n_ex}개 모두 보기")}</a></div>
+<div><h2 class=\"t-h2\">{tr(l, "Programs to read", "읽어 볼 프로그램", "值得一读的程序", "值得一讀的程式")}</h2><p>{tr(l, f"{n_ex} complete programs, each one built and run when the docs are checked.", f"완성된 프로그램 {n_ex}개. 문서를 검사할 때마다 하나하나 빌드하고 실행합니다.", f"{n_ex} 个完整的程序，每次检查文档时都会逐一构建并运行。", f"{n_ex} 個完整的程式，每次檢查文件時都會逐一建置並執行。")}</p><a class=\"t-ui\" href=\"{docs("examples/index.html")}\">{tr(l, f"All {n_ex} examples", f"예제 {n_ex}개 모두 보기", f"查看全部 {n_ex} 个示例", f"檢視全部 {n_ex} 個範例")}</a></div>
 <div class=\"ex-list\">");
         for k in 0..picked.len() {
             if k >= 8 { break; }
@@ -295,28 +304,28 @@ pub fn body(site: Site, examples: List<Example>, sizes: Dict<str, i64>, ko: bool
     }
 
     out.push_str(f"<section class=\"get\"><div class=\"frame\">
-<div><h2 class=\"t-h2\">{tr(ko, "Install", "설치")}</h2><p>{tr(ko, "One toolchain: the compiler with its own code generator and linker, the package tool, a REPL, a Jupyter kernel, a language server and the official packages. Nothing else to install.", "툴체인 하나에 다 들어 있습니다. 자체 코드 생성기와 링커를 갖춘 컴파일러, 패키지 도구, REPL, Jupyter 커널, 언어 서버, 공식 패키지. 따로 설치할 것이 없습니다.")}</p>
+<div><h2 class=\"t-h2\">{tr(l, "Install", "설치", "安装", "安裝")}</h2><p>{tr(l, "One toolchain: the compiler with its own code generator and linker, the package tool, a REPL, a Jupyter kernel, a language server and the official packages. Nothing else to install.", "툴체인 하나에 다 들어 있습니다. 자체 코드 생성기와 링커를 갖춘 컴파일러, 패키지 도구, REPL, Jupyter 커널, 언어 서버, 공식 패키지. 따로 설치할 것이 없습니다.", "一套工具链全包：自带代码生成器和链接器的编译器、包管理工具、REPL、Jupyter 内核、语言服务器和官方包。无需另外安装任何东西。", "一套工具鏈全包：內建程式碼產生器與連結器的編譯器、套件工具、REPL、Jupyter 核心、語言伺服器和官方套件。不必另外安裝任何東西。")}</p>
 <pre class=\"cb pre\"><code><span class=\"c\"># macOS (Apple silicon), Linux, FreeBSD</span>
 curl -fsSL https://nabi.sh | sh
 
-<span class=\"c\"># Windows (x64, arm64), {tr(ko, "in PowerShell", "PowerShell에서")}</span>
+<span class=\"c\"># Windows (x64, arm64), {tr(l, "in PowerShell", "PowerShell에서", "在 PowerShell 中", "在 PowerShell 中")}</span>
 powershell -ExecutionPolicy Bypass -c \"irm https://nabi.sh/install.ps1 | iex\"
 
 <span class=\"c\"># Nix</span>
 nix profile install github:nabi-lang/nabi</code></pre></div>
-<div class=\"arc-wrap\"><table class=\"arc\"><caption>{tr(ko, f"Archives for {esc(r)}", f"{esc(r)} 압축 파일")}</caption><tbody>");
-    for (os, triple, note, note_ko, ext) in ARCHIVES {
+<div class=\"arc-wrap\"><table class=\"arc\"><caption>{tr(l, f"Archives for {esc(r)}", f"{esc(r)} 압축 파일", f"{esc(r)} 压缩包", f"{esc(r)} 壓縮檔")}</caption><tbody>");
+    for (os, triple, ext, note) in ARCHIVES {
         let url = f"https://github.com/nabi-lang/nabi/releases/download/v{r}/nabi-{r}-{triple}{ext}";
         let size = if let n: i64 = sizes.get(f"nabi-{r}-{triple}{ext}") { f"<span class=\"sz\">{pkg::www::mb(n)}</span>" } else { "" };
-        out.push_str(f"<tr{pkg::www::os_attrs(triple)}><th scope=\"row\">{os}</th><td class=\"mono\">{triple}</td><td class=\"note\">{tr(ko, note, note_ko)}</td><td><a href=\"{esc(url)}\">{ext}</a>{size}</td></tr>");
+        out.push_str(f"<tr{pkg::www::os_attrs(triple)}><th scope=\"row\">{os}</th><td class=\"mono\">{triple}</td><td class=\"note\">{of(l, note)}</td><td><a href=\"{esc(url)}\">{ext}</a>{size}</td></tr>");
     }
-    out.push_str(f"</tbody></table><p class=\"t-small\">{tr(ko, "Checksums, other formats and cross-compilation targets: <a href=\"download.html\">Download</a>.", "체크섬, 다른 형식, 교차 컴파일 대상: <a href=\"download.html\">내려받기</a>.")}</p></div>\n</div></section>\n");
+    out.push_str(f"</tbody></table><p class=\"t-small\">{tr(l, "Checksums, other formats and cross-compilation targets: <a href=\"download.html\">Download</a>.", "체크섬, 다른 형식, 교차 컴파일 대상: <a href=\"download.html\">내려받기</a>.", "校验和、其他格式和交叉编译目标：<a href=\"download.html\">下载</a>。", "校驗和、其他格式與交叉編譯目標：<a href=\"download.html\">下載</a>。")}</p></div>\n</div></section>\n");
 
     if let x: News = n {
         // The release's announcement, when www has one (news/nabi-<r>.md).
-        let post = if fs::exists(f"{site.www}/{lang}news/nabi-{r}.md") { f"<a class=\"t-ui\" href=\"news/nabi-{esc(r)}.html\">{tr(ko, "Announcement", "발표")}</a> " } else { "" };
+        let post = if fs::exists(f"{site.www}/{lang}news/nabi-{r}.md") || fs::exists(f"{site.www}/news/nabi-{r}.md") { f"<a class=\"t-ui\" href=\"news/nabi-{esc(r)}.html\">{tr(l, "Announcement", "발표", "发布公告", "發布公告")}</a> " } else { "" };
         out.push_str(f"<section class=\"new\"><div class=\"frame\">
-<div><h2 class=\"t-h2\">{tr(ko, f"New in {esc(r)}", f"{esc(r)}의 새 기능")}</h2><p class=\"t-small\">{layout::long_date(x.date, ko)}</p>{post}<a class=\"t-ui\" href=\"https://github.com/nabi-lang/nabi/blob/v{r}/CHANGELOG.md\">{tr(ko, "Full changelog", "전체 변경 기록")}</a></div>
+<div><h2 class=\"t-h2\">{tr(l, f"New in {esc(r)}", f"{esc(r)}의 새 기능", f"{esc(r)} 新特性", f"{esc(r)} 新功能")}</h2><p class=\"t-small\">{layout::long_date(x.date, l)}</p>{post}<a class=\"t-ui\" href=\"https://github.com/nabi-lang/nabi/blob/v{r}/CHANGELOG.md\">{tr(l, "Full changelog", "전체 변경 기록", "完整更新日志", "完整變更紀錄")}</a></div>
 <ul>");
         for k in 0..x.items.len() {
             if k >= 6 { break; }

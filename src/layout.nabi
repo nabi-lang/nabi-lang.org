@@ -9,27 +9,41 @@ use core::encoding;
 use markdown::{Doc, Heading, Options, esc, strip_tags};
 use web::build::{between, clip, dir_of, json_str};
 use web::chrome;
+use web::lang;
+use web::lang::Lang;
 use web::url;
 
 /// Markdown as HTML: `link` maps hrefs, ```nabi / ```nabion highlighted,
-/// ```output as `<pre class="output">`; Korean callout titles if `ko`
-/// (Korean spec pages), English otherwise.
-pub fn md(src: str, link: fn(str) -> str, ko: bool) -> Doc {
+/// ```output as `<pre class="output">`; callout titles and the code
+/// blocks' buttons in `l`.
+pub fn md(src: str, link: fn(str) -> str, l: Lang) -> Doc {
     // Fragments of links into the docs follow the tidied heading ids.
     let fix = |h: str| tidy_ref(link(h));
-    let o = if ko { Options { link: fix, code: code_html, callout: callout_ko } } else { Options { link: fix, code: code_html } };
+    let o = match l {
+        Lang::En => Options { link: fix, code: code_html },
+        Lang::Ko => Options { link: fix, code: code_html, callout: callout_ko },
+        Lang::ZhHans => Options { link: fix, code: code_html, callout: callout_hans },
+        Lang::ZhHant => Options { link: fix, code: code_html, callout: callout_hant },
+    };
     let d = markdown::render(src, o);
     d.html = chrome::align_classes(d.html);
     d.html = d.html.replace("<pre><code class=\"language-output\">", "<pre class=\"output\"><code class=\"language-output\">");
     // The heading permalinks are links in their own right: named, focusable.
-    d.html = d.html.replace(" aria-hidden=\"true\">#</a>", f" aria-label=\"{anchor_label(ko)}\">#</a>");
+    d.html = d.html.replace(" aria-hidden=\"true\">#</a>", f" aria-label=\"{anchor_label(l)}\">#</a>");
     d = tidy_ids(d);
-    d.html = code_blocks(d.html, ko);
+    d.html = code_blocks(d.html, l);
     d
 }
 
 /// The accessible name of a heading's permalink.
-pub fn anchor_label(ko: bool) -> str { if ko { "이 절의 링크" } else { "Link to this section" } }
+pub fn anchor_label(l: Lang) -> str { tr(l, "Link to this section", "이 절의 링크", "本节链接", "本節連結") }
+
+/// The note over a page not translated into `l` yet, which shows the
+/// English text.
+pub fn untranslated(l: Lang) -> str {
+    let t = tr(l, "", "이 페이지는 아직 번역되지 않았습니다. 영어 원문을 그대로 보여 줍니다.", "本页尚未翻译，以下为英文原文。", "本頁尚未翻譯，以下為英文原文。");
+    f"<p class=\"tr-note\">{t}</p>\n"
+}
 
 /// A heading slug with each run of dashes collapsed and none at either
 /// end: `31410-the--operator---early-return-of-none` ->
@@ -99,7 +113,7 @@ fn widest(ls: List<str>) -> usize {
 /// it folded in, side by side when both are short, folded when long.
 /// Decided here, not in search.js, so nothing moves once the page shows;
 /// search.js only adds the buttons to the bar.
-fn code_blocks(html: str, ko: bool) -> str {
+fn code_blocks(html: str, l: Lang) -> str {
     let open = "<pre><code";
     let close = "</code></pre>";
     let out = StrBuf::new();
@@ -150,7 +164,8 @@ fn code_blocks(html: str, ko: bool) -> str {
         let two = if side { " side-by-side" } else { "" };
         out.push_str(f"<div class=\"code cb{fold}\"><div class=\"cb-h\">{name}</div><div class=\"cb-body{two}\">{code}{output}</div>");
         if tall {
-            let more = if ko { f"{c.len()}줄 모두 보기" } else { f"Show all {c.len()} lines" };
+            let n = c.len();
+            let more = tr(l, f"Show all {n} lines", f"{n}줄 모두 보기", f"显示全部 {n} 行", f"顯示全部 {n} 行");
             out.push_str(f"<button type=\"button\" class=\"expand\" aria-expanded=\"false\">{more}</button>");
         }
         out.push_str("</div>\n");
@@ -239,12 +254,29 @@ fn callout_ko(kind: str) -> str {
     }
 }
 
+fn callout_hans(kind: str) -> str { callout_zh(kind, ["说明", "提示", "重要", "警告", "注意"]) }
+fn callout_hant(kind: str) -> str { callout_zh(kind, ["說明", "提示", "重要", "警告", "注意"]) }
+
+/// GitHub's callouts note, tip, important, warning and caution, named.
+fn callout_zh(kind: str, names: [str; 5]) -> str {
+    let kinds = ["note", "tip", "important", "warning", "caution"];
+    for k in 0..5 {
+        if kind == kinds[k] { return names[k]; }
+    }
+    kind
+}
+
 /// The end of a page whose source is at `url`, last changed on `date`
 /// (`2026-10-31`, or `""` when the content bundle has no dates).
-pub fn edit_link(url: str, date: str, ko: bool) -> str {
-    let (ask, label) = if ko { ("잘못된 곳이 있나요?", "GitHub에서 이 페이지 고치기") } else { ("Found a mistake?", "Edit this page on GitHub") };
-    let when = if date.is_empty() { "" } else if ko { f" <span class=\"upd\">마지막 수정 <time datetime=\"{esc(date)}\">{long_date(date, true)}</time></span>" } else { f" <span class=\"upd\">Last updated <time datetime=\"{esc(date)}\">{long_date(date, false)}</time></span>" };
-    f"<p class=\"edit\">{ask} <a href=\"{esc(url)}\">{label}</a>.{when}</p>\n"
+pub fn edit_link(url: str, date: str, l: Lang) -> str {
+    let ask = tr(l, "Found a mistake?", "잘못된 곳이 있나요?", "发现错误？", "發現錯誤？");
+    let label = tr(l, "Edit this page on GitHub", "GitHub에서 이 페이지 고치기", "在 GitHub 上编辑此页", "在 GitHub 上編輯此頁");
+    // Chinese ends the sentence itself.
+    let zh = l == Lang::ZhHans || l == Lang::ZhHant;
+    let stop = if zh { "" } else { "." };
+    let upd = tr(l, "Last updated ", "마지막 수정 ", "最后更新：", "最後更新：");
+    let when = if date.is_empty() { "" } else { f" <span class=\"upd\">{upd}<time datetime=\"{esc(date)}\">{long_date(date, l)}</time></span>" };
+    f"<p class=\"edit\">{ask} <a href=\"{esc(url)}\">{label}</a>{stop}{when}</p>\n"
 }
 
 /// The date of a page's "Last updated" note (edit_link), or `""`.
@@ -255,15 +287,21 @@ pub fn page_date(html: str) -> str {
 
 const MONTHS: [str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 
-/// "2026-10-29" -> "29 October 2026", or "2026년 10월 29일" if `ko`.
-pub fn long_date(d: str, ko: bool) -> str {
+/// "2026-10-29" -> "29 October 2026", "2026년 10월 29일" in Korean,
+/// "2026年10月29日" in Chinese.
+pub fn long_date(d: str, l: Lang) -> str {
     let p: List<str> = List::new();
     for x in d.split("-") { p.push(x); }
     if p.len() != 3 { return d; }
     let m = try p[1].parse::<usize>() catch _ { return d; };
     let day = try p[2].parse::<usize>() catch _ { return d; };
     if m < 1 || m > 12 { return d; }
-    if ko { f"{p[0]}년 {m}월 {day}일" } else { f"{day} {MONTHS[m - 1]} {p[0]}" }
+    match l {
+        Lang::En => f"{day} {MONTHS[m - 1]} {p[0]}",
+        Lang::Ko => f"{p[0]}년 {m}월 {day}일",
+        Lang::ZhHans => f"{p[0]}年{m}月{day}日",
+        Lang::ZhHant => f"{p[0]}年{m}月{day}日",
+    }
 }
 
 /// `../` once per directory level of `out`, back to the site root.
@@ -454,7 +492,7 @@ pub fn lead_text(html: str) -> str { strip_tags(lead(html)).replace("\n", " ").t
 /// two-column list for `examples/`, numbered chapters otherwise.
 pub fn contents(group: List<Page>) -> str {
     let p = group[0];
-    let ex = p.out.starts_with("examples/") || p.out.starts_with("ko/examples/");
+    let ex = lang::split(p.out).1.starts_with("examples/");
     let out = StrBuf::new();
     out.push_str(if ex { "<div class=\"ex-list\">" } else { "<ol class=\"chapters\">" });
     for k in 1..group.len() {
@@ -476,20 +514,29 @@ pub fn page_toc(p: Page) -> str {
     f"<p class=\"side-title\"><a aria-current=\"page\" href=\"#\">{esc(p.title)}</a></p>"
 }
 
-/// `en` on English pages, `kr` on Korean ones.
-pub fn tr(ko: bool, en: str, kr: str) -> str { if ko { kr } else { en } }
+/// The site's words, one string per language: `en`, `ko`, `hans`
+/// (zh-Hans) and `hant` (zh-Hant, as written in Taiwan). The kit's own
+/// words are web::lang::Words.
+pub fn tr(l: Lang, en: str, ko: str, hans: str, hant: str) -> str {
+    match l {
+        Lang::En => en,
+        Lang::Ko => ko,
+        Lang::ZhHans => hans,
+        Lang::ZhHant => hant,
+    }
+}
 
-pub fn pager(pages: List<Page>, idx: usize, ko: bool) -> str {
+pub fn pager(pages: List<Page>, idx: usize, l: Lang) -> str {
     let p = pages[idx];
     let out = StrBuf::new();
-    out.push_str(f"<nav class=\"pager\" aria-label=\"{tr(ko, "Previous and next page", "이전 페이지와 다음 페이지")}\">");
+    out.push_str(f"<nav class=\"pager\" aria-label=\"{tr(l, "Previous and next page", "이전 페이지와 다음 페이지", "上一页和下一页", "上一頁和下一頁")}\">");
     if idx > 0 {
         let q = pages[idx - 1];
-        out.push_str(f"<a class=\"prev\" href=\"{rel(p.out, q.out)}\"><small>← {tr(ko, "Previous", "이전")}</small><span>{esc(q.title)}</span></a>");
+        out.push_str(f"<a class=\"prev\" href=\"{rel(p.out, q.out)}\"><small>← {tr(l, "Previous", "이전", "上一页", "上一頁")}</small><span>{esc(q.title)}</span></a>");
     }
     if idx + 1 < pages.len() {
         let q = pages[idx + 1];
-        out.push_str(f"<a class=\"next\" href=\"{rel(p.out, q.out)}\"><small>{tr(ko, "Next", "다음")} →</small><span>{esc(q.title)}</span></a>");
+        out.push_str(f"<a class=\"next\" href=\"{rel(p.out, q.out)}\"><small>{tr(l, "Next", "다음", "下一页", "下一頁")} →</small><span>{esc(q.title)}</span></a>");
     }
     out.push_str("</nav>");
     out.to_str()
@@ -500,16 +547,21 @@ fn nav_item(href: str, label: str, on: bool) -> str {
     f"<a href=\"{href}\"{cur}>{label}</a>"
 }
 
-/// The site's description in Korean (site.description in English).
-/// The slogan in Korean, for the Korean docs only.
-pub const TAGLINE_KO: str = "규칙은 분명하게, 나비처럼 자유롭게.";
-pub const DESC_KO: str = "규칙은 분명하게, 나비처럼 자유롭게. Nabi는 닫힌 합 타입이 있고, null이 없고, 함수 시그니처에 에러가 드러나는 컴파일 언어입니다. 네이티브 프로그램, 패키지 레지스트리, REPL, Jupyter를 지원합니다.";
+/// The slogan in `l` (site.tagline in English).
+pub fn tagline(site: Site, l: Lang) -> str { if l.is_en() { site.tagline } else { l.words().tagline } }
+
+/// The site's description in `l` (site.description in English).
+pub fn description(site: Site, l: Lang) -> str {
+    tr(l, site.description,
+        "규칙은 분명하게, 나비처럼 자유롭게. Nabi는 닫힌 합 타입이 있고, null이 없고, 함수 시그니처에 에러가 드러나는 컴파일 언어입니다. 네이티브 프로그램, 패키지 레지스트리, REPL, Jupyter를 지원합니다.",
+        "规则清晰，如蝶般自由。Nabi 是一门编译型编程语言：和类型是封闭的，没有 null，错误写在函数签名里。支持原生程序、包注册表、REPL 和 Jupyter。",
+        "規則清晰，如蝶般自由。Nabi 是一種編譯式程式語言：和型別是封閉的，沒有 null，錯誤寫在函式簽章裡。支援原生程式、套件庫、REPL 與 Jupyter。")
+}
 
 /// The page's summary for `<meta name="description">`: its first paragraph.
 fn describe(site: Site, out: str, body: str) -> str {
-    let ko = out.starts_with("ko/");
-    let whole = if ko { DESC_KO } else { site.description };
-    let at = out.strip_prefix("ko/") ?? out;
+    let (l, at) = lang::split(out);
+    let whole = description(site, l);
     if at == "index.html" || at == "404.html" { return whole; }
     let s = lead_text(body);
     if s.is_empty() { whole } else { clip(s, 160) }
@@ -525,12 +577,12 @@ pub fn asset(site: Site, root: str, name: str) -> str {
 
 /// `<head>` from the charset to the icons (chrome::head). `root` leads
 /// to the icons and stylesheets, `url` is the canonical address (`""`:
-/// none), `img` the og:image (with its `?v=`) and `alt` its text. `ko`: a
-/// Korean page (Pretendard for those only).
-fn head(site: Site, root: str, full: str, desc: str, url: str, img: str, alt: str, extra: str, ko: bool) -> str {
+/// none), `img` the og:image (with its `?v=`) and `alt` its text; `l` the
+/// page's language (its fonts, its og:locale).
+fn head(site: Site, root: str, full: str, desc: str, url: str, img: str, alt: str, extra: str, l: Lang) -> str {
     // The docs' own cards are 1200 x 630; the site's card is og.png's size.
     let (w, h) = if img.contains("/og/") { (1200i64, 630i64) } else { (site.og_w, site.og_h) };
-    chrome::head(chrome::Head { title: full, site: site.title, desc: desc, url: url, img: img, img_w: w, img_h: h, alt: alt, root: root, asset: |n| asset(site, root, n), extra: extra, ko: ko })
+    chrome::head(chrome::Head { title: full, site: site.title, desc: desc, url: url, img: img, img_w: w, img_h: h, alt: alt, root: root, asset: |n| asset(site, root, n), extra: extra, lang: l })
 }
 
 /// The address of `path` (`learn/index.html#x`) in the newest release's
@@ -592,27 +644,46 @@ pub fn cards(pages: List<Frag>) -> Cards {
 }
 
 pub fn card(f: Frag) -> Card {
-    let ko = f.out.starts_with("ko/");
-    let at = if ko { f.out["ko/".len():] } else { f.out };
-    let (key, en, kr, index) = section(at);
+    let (l, at) = lang::split(f.out);
+    let s = section(at);
     let (no, rest) = split_no(f.title);
     // A section's own index says "Docs"; its pages say the section.
-    let sec = if at == "index.html" || at == index || en.is_empty() {
-        tr(ko, "Docs", "문서")
+    let sec = if at == "index.html" || at == s.index || s.en.is_empty() {
+        l.words().docs
     } else {
-        tr(ko, en, kr) + if no.is_empty() || key != "guide" { "" } else { tr(ko, " / Chapter " + no, " / " + no + "장") }
+        s.name(l) + if no.is_empty() || s.key != "guide" { "" } else { " / " + chapter_no(l, no) }
     };
-    Card { name: og_name(f.out), section: sec, title: rest, lead: first_sentence(lead_text(f.body)), lang: if ko { "ko" } else { "en" } }
+    Card { name: og_name(f.out), section: sec, title: rest, lead: first_sentence(lead_text(f.body)), lang: l.code() }
 }
+
+/// "Chapter 5" in `l`.
+pub fn chapter_no(l: Lang, no: str) -> str { tr(l, "Chapter " + no, no + "장", f"第 {no} 章", f"第 {no} 章") }
 
 /// nabi-lang.org page `out`'s `<meta name="description">`.
 pub fn www_desc(site: Site, out: str) -> str {
+    let (l, at) = lang::split(out);
+    if l == Lang::ZhHans || l == Lang::ZhHant {
+        let zh = |hans: str, hant: str| if l == Lang::ZhHans { hans } else { hant };
+        return if at == "download.html" {
+            zh(f"下载适用于 macOS、Linux 和 Windows 的 Nabi {site.release}：安装脚本，或附带 SHA-256 的压缩包。", f"下載適用於 macOS、Linux 與 Windows 的 Nabi {site.release}：安裝指令碼，或附有 SHA-256 的壓縮檔。")
+        } else if at == "roadmap.html" {
+            zh("Nabi 路线图：当前版本包含什么，语言接下来往哪里走。", "Nabi 路線圖：目前版本包含哪些內容，以及語言接下來的方向。")
+        } else if at == "index.html" {
+            zh("规则清晰，如蝶般自由。Nabi 是一门编译型语言：封闭的和类型，没有 null，错误写在函数签名里。原生程序、包注册表、REPL 和 Jupyter 一应俱全。", "規則清晰，如蝶般自由。Nabi 是一種編譯式語言：封閉的和型別，沒有 null，錯誤寫在函式簽章裡。原生程式、套件庫、REPL 與 Jupyter 一應俱全。")
+        } else if at == "faq.html" {
+            zh("关于 Nabi 的常见问题：为什么要一门新语言、为什么不用 LLVM、哪些部分已经稳定、平台、包、许可证和安全问题报告。", "關於 Nabi 的常見問題：為什麼需要新語言、為什麼不用 LLVM、哪些部分已經穩定、平台、套件、授權條款與安全性問題回報。")
+        } else if at == "news/index.html" {
+            zh("Nabi 动态：版本发布公告和项目进展。", "Nabi 最新消息：版本發布公告與專案進展。")
+        } else {
+            site.description
+        };
+    }
     if out == "ko/download.html" {
         f"macOS, Linux, Windows용 Nabi {site.release} 내려받기: 설치 스크립트, 또는 SHA-256이 붙은 압축 파일."
     } else if out == "ko/roadmap.html" {
         "Nabi 로드맵: 지금 릴리스에 든 것과 언어가 다음으로 향하는 곳."
     } else if out == "ko/index.html" {
-        f"{TAGLINE_KO} Nabi는 닫힌 합 타입, null 없음, 함수 시그니처에 드러나는 에러를 갖춘 컴파일 언어입니다. 네이티브 프로그램, 패키지 레지스트리, REPL, Jupyter를 함께 제공합니다."
+        f"{tagline(site, Lang::Ko)} Nabi는 닫힌 합 타입, null 없음, 함수 시그니처에 드러나는 에러를 갖춘 컴파일 언어입니다. 네이티브 프로그램, 패키지 레지스트리, REPL, Jupyter를 함께 제공합니다."
     } else if out == "download.html" {
         f"Download Nabi {site.release} for macOS, Linux and Windows: the install script, or an archive with its SHA-256."
     } else if out == "roadmap.html" {
@@ -640,7 +711,7 @@ fn page_lead(html: str) -> str | none {
 /// The card of nabi-lang.org page `out`: no section, its title and its
 /// description.
 pub fn www_card(site: Site, out: str, title: str) -> Card {
-    Card { name: og_name(out), section: "", title: title, lead: www_desc(site, out), lang: if out.starts_with("ko/") { "ko" } else { "en" } }
+    Card { name: og_name(out), section: "", title: title, lead: www_desc(site, out), lang: lang::of_path(out).code() }
 }
 
 /// Names what card `c` looks like: its text and the template.
@@ -665,45 +736,59 @@ const TOGGLE: str = "<button class=\"nav-toggle\" type=\"button\" aria-label=\"M
 
 /// The footer every Nabi site shares (chrome::site_cols, legal links in
 /// its bar). `on` is the site the page belongs to, `home` or `docs`.
-fn footer(site: Site, l: chrome::Links, note: str, logo: str, ko: bool, on: str) -> str {
+fn footer(site: Site, l: chrome::Links, note: str, logo: str, lg: Lang, on: str) -> str {
     chrome::footer(chrome::Footer {
-        home: l.home + (if ko { "ko/" } else { "" }),
+        home: l.home + lg.dir(),
         logo: logo,
-        tagline: tr(ko, site.tagline, TAGLINE_KO),
-        cols: chrome::site_cols(l, ko),
+        tagline: tagline(site, lg),
+        cols: chrome::site_cols_for(l, lg),
         sites: chrome::Sites { home: l.home, docs: l.docs, registry: l.registry, playground: l.playground, current: on },
         after: note,
-        ko: ko,
+        lang: lg,
         release: site.release,
     })
 }
 
-/// The docs' sections in header order: nav key, English and Korean name,
-/// index page. One name per section, everywhere.
-pub const SECTIONS: [(str, str, str, str); 6] = [
-    ("guide", "Guide", "가이드", "learn/index.html"),
-    ("examples", "Examples", "예제", "examples/index.html"),
-    ("spec", "Language spec", "언어 사양", "spec/refs-lang/index.html"),
-    ("std", "Std library", "표준 라이브러리", "std/index.html"),
-    ("errors", "Error codes", "에러 코드", "errors/index.html"),
-    ("tools", "Tools", "도구", "spec/refs-lang/009-tools/index.html"),
+/// A docs section: its nav key, its name in each language and its index
+/// page.
+pub struct Section {
+    pub key: str;
+    pub en: str;
+    pub ko: str;
+    pub hans: str;
+    pub hant: str;
+    pub index: str;
+}
+
+impl Section {
+    pub fn name(self, l: Lang) -> str { tr(l, self.en, self.ko, self.hans, self.hant) }
+}
+
+/// The docs' sections in header order. One name per section, everywhere.
+pub const SECTIONS: [Section; 6] = [
+    Section { key: "guide", en: "Guide", ko: "가이드", hans: "指南", hant: "指南", index: "learn/index.html" },
+    Section { key: "examples", en: "Examples", ko: "예제", hans: "示例", hant: "範例", index: "examples/index.html" },
+    Section { key: "spec", en: "Language spec", ko: "언어 사양", hans: "语言规范", hant: "語言規格", index: "spec/refs-lang/index.html" },
+    Section { key: "std", en: "Std library", ko: "표준 라이브러리", hans: "标准库", hant: "標準函式庫", index: "std/index.html" },
+    Section { key: "errors", en: "Error codes", ko: "에러 코드", hans: "错误代码", hant: "錯誤代碼", index: "errors/index.html" },
+    Section { key: "tools", en: "Tools", ko: "도구", hans: "工具", hant: "工具", index: "spec/refs-lang/009-tools/index.html" },
 ];
 
-/// The section of docs page `at` (without `ko/`): nav key, English and
-/// Korean name, index page; empty outside the sections.
-pub fn section(at: str) -> (str, str, str, str) {
+const LIB_SPEC: Section = Section { key: "std", en: "Library spec", ko: "라이브러리 사양", hans: "库规范", hant: "函式庫規格", index: "spec/refs-standard-libraries/index.html" };
+const NO_SECTION: Section = Section { key: "", en: "", ko: "", hans: "", hant: "", index: "" };
+
+/// The section of docs page `at` (without its language's directory);
+/// empty outside the sections.
+pub fn section(at: str) -> Section {
     if at.starts_with("learn/") { return SECTIONS[0]; }
     if at.starts_with("examples/") { return SECTIONS[1]; }
     if at.starts_with("errors/") { return SECTIONS[4]; }
     if at.starts_with("spec/refs-lang/009-tools/") { return SECTIONS[5]; }
-    if at.starts_with("spec/refs-standard-libraries/") { return ("std", "Library spec", "라이브러리 사양", "spec/refs-standard-libraries/index.html"); }
+    if at.starts_with("spec/refs-standard-libraries/") { return LIB_SPEC; }
     if at.starts_with("spec/") { return SECTIONS[2]; }
     if at.starts_with("std/") { return SECTIONS[3]; }
-    ("", "", "", "")
+    NO_SECTION
 }
-
-/// Docs page `p` (from the version root) in Korean if `ko`.
-pub fn in_lang(p: str, ko: bool) -> str { if ko { "ko/" + p } else { p } }
 
 /// The note over the docs of any version but the newest release, linking
 /// to this page in latest/ if it is there (`in_latest`), else to latest/.
@@ -711,15 +796,17 @@ pub fn in_lang(p: str, ko: bool) -> str { if ko { "ko/" + p } else { p } }
 /// `root` leads from the page to its version's directory.
 pub fn ver_banner(site: Site, root: str, out: str, in_latest: bool) -> str {
     if site.version == site.newest || site.newest.is_empty() { return ""; }
-    let ko = out.starts_with("ko/");
+    let l = lang::of_path(out);
     let up = if root.starts_with("/") { "/" } else { root + "../" };
-    let to = up + "latest/" + if in_latest && !out.ends_with("404.html") { out } else { in_lang("index.html", ko) };
+    let to = up + "latest/" + if in_latest && !out.ends_with("404.html") { out } else { l.path("index.html") };
     let rel = "v" + if site.newest_release.is_empty() { site.newest } else { site.newest_release };
-    let (what, go) = if ko {
-        (if site.version == "dev" { "아직 릴리스하지 않은 다음 버전의 문서입니다." } else { f"v{site.version} 문서를 보고 있습니다. 이 버전은 더 이상 지원하지 않습니다." }, f"최신 릴리스: {rel} →")
+    let v = site.version;
+    let what = if v == "dev" {
+        tr(l, "Unreleased docs for the next version.", "아직 릴리스하지 않은 다음 버전의 문서입니다.", "这是尚未发布的下一版本的文档。", "這是尚未發布的下一版文件。")
     } else {
-        (if site.version == "dev" { "Unreleased docs for the next version." } else { f"You are reading the docs for v{site.version}. Nabi {site.version} is no longer supported." }, f"Latest release: {rel} →")
+        tr(l, f"You are reading the docs for v{v}. Nabi {v} is no longer supported.", f"v{v} 문서를 보고 있습니다. 이 버전은 더 이상 지원하지 않습니다.", f"你正在阅读 v{v} 的文档。Nabi {v} 已不再提供支持。", f"您正在閱讀 v{v} 的文件。Nabi {v} 已停止支援。")
     };
+    let go = tr(l, f"Latest release: {rel} →", f"최신 릴리스: {rel} →", f"最新版本：{rel} →", f"最新版本：{rel} →");
     f"<p class=\"ver-banner\">{what} <a href=\"{to}\">{go}</a></p>\n"
 }
 
@@ -733,20 +820,20 @@ pub fn page(site: Site, f: Frag, banner: str) -> str { frame(site, root_of(f.out
 /// toolchain docs of version directory `dir` (`latest`).
 pub fn package_page(site: Site, f: Frag, dir: str) -> str { frame(site, root_of(f.out) + dir + "/", f, "") }
 
-/// The 404 page of the version directory `dir` (its Korean one if `ko`),
-/// served for any missing path under it, so its links are absolute and
-/// stay in that version.
-pub fn not_found_page(site: Site, dir: str, ko: bool) -> str {
+/// The 404 page of the version directory `dir` in `l`, served for any
+/// missing path under it, so its links are absolute and stay in that
+/// version.
+pub fn not_found_page(site: Site, dir: str, l: Lang) -> str {
     let root = "/" + dir + "/";
-    let out = if ko { "ko/404.html" } else { "404.html" };
-    let f = Frag { out: out, title: tr(ko, "Page not found", "페이지를 찾을 수 없습니다"), side: "", body: not_found(|p| root + in_lang(p, ko), ko, site.no_errors), pager: "", head: "" };
+    let out = l.path("404.html");
+    let f = Frag { out: out, title: l.words().not_found, side: "", body: not_found(|p| root + l.path(p), l, site.no_errors), pager: "", head: "" };
     frame(site, root, f, ver_banner(site, root, out, false))
 }
 
-/// `packages/<name>/` of a package docs page `out` (`ko/` kept), `""`
-/// for the index.
+/// `packages/<name>/` of a package docs page `out` (in any language),
+/// `""` for the index.
 fn pkg_name(out: str) -> str {
-    let at = out.strip_prefix("ko/") ?? out;
+    let at = lang::split(out).1;
     let rest = at.strip_prefix("packages/") ?? return "";
     if let (n, _): (str, str) = rest.split_once("/") { if n == "index.html" { "" } else { n } } else { "" }
 }
@@ -754,8 +841,7 @@ fn pkg_name(out: str) -> str {
 /// The directory a package docs page searches: its version's
 /// (`packages/json/0.1.0/`), or `packages/` for the index.
 fn pkg_base(out: str) -> str {
-    let ko = out.starts_with("ko/");
-    let lp = if ko { "ko/" } else { "" };
+    let lp = lang::of_path(out).dir();
     let n = pkg_name(out);
     if n.is_empty() { return lp + "packages/"; }
     let at = out[lp.len() + "packages/".len() + n.len() + 1:];
@@ -766,56 +852,76 @@ fn pkg_base(out: str) -> str {
 /// The left of a package docs page's header, as docs.rs has it: the
 /// docs mark back to every package's docs, the package and its version
 /// menu, and its links. The index names itself instead.
-fn pkg_bar(site: Site, f: Frag, ko: bool) -> str {
-    let lp = if ko { "/ko/" } else { "/" };
-    let brand = f"<a class=\"brand\" href=\"{lp}packages/\" lang=\"en\" title=\"{tr(ko, "All package docs", "모든 패키지 문서")}\">{web::chrome::wordmark("Nabi")}<span class=\"sl\" aria-hidden=\"true\">/</span><span class=\"site\">packages</span></a>";
-    let toggle = TOGGLE.replace("aria-label=\"Menu\"", f"aria-label=\"{tr(ko, "Menu", "메뉴")}\"");
-    let lang_docs = nav_item(f"{lp}latest/{if ko { "ko/" } else { "" }}", tr(ko, "Language docs", "언어 문서"), false);
+fn pkg_bar(site: Site, f: Frag, l: Lang) -> str {
+    let lp = "/" + l.dir();
+    let brand = f"<a class=\"brand\" href=\"{lp}packages/\" lang=\"en\" title=\"{tr(l, "All package docs", "모든 패키지 문서", "所有包文档", "所有套件文件")}\">{web::chrome::wordmark("Nabi")}<span class=\"sl\" aria-hidden=\"true\">/</span><span class=\"site\">packages</span></a>";
+    let toggle = TOGGLE.replace("aria-label=\"Menu\"", f"aria-label=\"{menu_word(l)}\"");
+    let lang_docs = nav_item(f"{lp}latest/{l.dir()}", tr(l, "Language docs", "언어 문서", "语言文档", "語言文件"), false);
+    let pkg_docs = l.words().package_docs;
+    let registry = tr(l, "Registry", "레지스트리", "注册表", "套件庫");
     let n = pkg_name(f.out);
     if n.is_empty() {
-        let nav = nav_item(f"{lp}packages/", tr(ko, "Package docs", "패키지 문서"), true) + nav_item(esc(site.packages) + "/packages", tr(ko, "Registry", "레지스트리"), false) + lang_docs;
-        return f"{brand}\n{toggle}\n<nav id=\"nav\" class=\"nav main-nav\" aria-label=\"{tr(ko, "Package docs", "패키지 문서")}\">{nav}</nav>";
+        let nav = nav_item(f"{lp}packages/", pkg_docs, true) + nav_item(esc(site.packages) + "/packages", registry, false) + lang_docs;
+        return f"{brand}\n{toggle}\n<nav id=\"nav\" class=\"nav main-nav\" aria-label=\"{pkg_docs}\">{nav}</nav>";
     }
     let reg = f"{esc(site.packages)}/packages/{esc(n)}";
     let out = " <span class=\"out\" aria-hidden=\"true\">↗</span>";
-    let vers = if f.pkg_vers.is_empty() { f"<span class=\"pkg-v\">v{esc(f.pkg_ver)}</span>" } else { f"<details class=\"vers\"><summary aria-label=\"{tr(ko, "Package version", "패키지 버전")}: v{esc(f.pkg_ver)}\">v{esc(f.pkg_ver)}</summary><ul class=\"vers-menu\">{f.pkg_vers}</ul></details>" };
+    let vers = if f.pkg_vers.is_empty() { f"<span class=\"pkg-v\">v{esc(f.pkg_ver)}</span>" } else { f"<details class=\"vers\"><summary aria-label=\"{tr(l, "Package version", "패키지 버전", "包版本", "套件版本")}: v{esc(f.pkg_ver)}\">v{esc(f.pkg_ver)}</summary><ul class=\"vers-menu\">{f.pkg_vers}</ul></details>" };
     let title = f"<div class=\"pkg-title\" lang=\"en\"><a class=\"pkg-name\" href=\"/{esc(pkg_base(f.out))}\">{esc(n)}</a>{vers}</div>";
     let nav = StrBuf::new();
-    nav.push_str(nav_item(f"/{esc(pkg_base(f.out))}", tr(ko, "Docs", "문서"), true));
-    if !f.pkg_src.is_empty() { nav.push_str(nav_item(esc(f.pkg_src), tr(ko, "Source", "소스") + out, false)); }
-    nav.push_str(nav_item(f"{reg}/{esc(f.pkg_ver)}", tr(ko, "Registry", "레지스트리") + out, false));
-    nav.push_str(nav_item(reg + "/dependencies", tr(ko, "Dependencies", "의존성") + out, false));
-    nav.push_str(nav_item(reg + "/dependents", tr(ko, "Dependents", "역의존성") + out, false));
+    nav.push_str(nav_item(f"/{esc(pkg_base(f.out))}", l.words().docs, true));
+    if !f.pkg_src.is_empty() { nav.push_str(nav_item(esc(f.pkg_src), tr(l, "Source", "소스", "源代码", "原始碼") + out, false)); }
+    nav.push_str(nav_item(f"{reg}/{esc(f.pkg_ver)}", registry + out, false));
+    nav.push_str(nav_item(reg + "/dependencies", tr(l, "Dependencies", "의존성", "依赖", "相依套件") + out, false));
+    nav.push_str(nav_item(reg + "/dependents", tr(l, "Dependents", "역의존성", "被依赖", "被相依") + out, false));
     nav.push_str(lang_docs);
-    f"{brand}\n{title}\n{toggle}\n<nav id=\"nav\" class=\"nav main-nav\" aria-label=\"{tr(ko, "Package", "패키지")}\">{nav.to_str()}</nav>"
+    f"{brand}\n{title}\n{toggle}\n<nav id=\"nav\" class=\"nav main-nav\" aria-label=\"{tr(l, "Package", "패키지", "包", "套件")}\">{nav.to_str()}</nav>"
 }
+
+fn menu_word(l: Lang) -> str { tr(l, "Menu", "메뉴", "菜单", "選單") }
 
 /// The language menu of a package's docs page `out` (pkgdocs): the docs
-/// are in English, so the other language is the same page with the
-/// other language's header and footer (`ko/packages/..`).
-fn pkg_switch(out: str, ko: bool) -> str {
-    let en = out.strip_prefix("ko/") ?? out;
+/// are in English, so each language is the same page with that
+/// language's header and footer (`ko/packages/..`).
+fn pkg_switch(out: str, l: Lang) -> str {
+    let en = lang::split(out).1;
     let up = root_of(out);
-    chrome::lang_menu(ko, [chrome::Lang { code: "en", name: "English", href: if ko { up + en } else { "" } }, chrome::Lang { code: "ko", name: "한국어", href: if ko { "" } else { up + "ko/" + en } }], "")
+    chrome::lang_menu_for(l, chrome::menu_items(l, |m| up + m.path(en)), "")
 }
 
-/// The header's language menu (chrome::lang_menu) of the page `at`
-/// (without `ko/`): the other language's page is `alt`, from the version
-/// root, else the same path in the other language. `sec` pairs this
-/// page's heading ids with the other's (search.js).
-fn lang_switch(root: str, at: str, ko: bool, alt: str, sec: str) -> str {
-    let other = if !alt.is_empty() { alt } else if ko { at } else { "ko/" + at };
-    let href = root + other;
-    let data = if sec.is_empty() { "" } else { f" data-sec=\"{esc(sec)}\"" };
-    chrome::lang_menu(ko, [chrome::Lang { code: "en", name: "English", href: if ko { href } else { "" } }, chrome::Lang { code: "ko", name: "한국어", href: if ko { "" } else { href } }], data)
+/// The header's language menu (chrome::lang_menu_for) of docs page `f`
+/// in `l` (`at` its path without the language's directory): each
+/// language's page from Frag::alts, with the heading pairs search.js
+/// carries the reader's section over with. A page of a bundle archived
+/// with two languages has `alt` only: English and Korean then, the other
+/// language's page `alt`, else the same path in it.
+fn lang_switch(root: str, at: str, l: Lang, f: Frag) -> str {
+    let items: List<chrome::Lang> = List::new();
+    if f.alts.is_empty() {
+        let ko = l == Lang::Ko;
+        let other = if !f.alt.is_empty() { f.alt } else if ko { at } else { "ko/" + at };
+        let href = root + other;
+        for m in [Lang::En, Lang::Ko] {
+            if m == l { items.push(chrome::Lang { code: m.code(), name: m.name() }); } else { items.push(chrome::Lang { code: m.code(), name: m.name(), href: href, sec: f.sec }); }
+        }
+        return chrome::lang_menu_for(l, items, "");
+    }
+    for m in lang::ALL {
+        if m == l {
+            items.push(chrome::Lang { code: m.code(), name: m.name() });
+        } else if let p: str = f.alts.get(m.code()) {
+            items.push(chrome::Lang { code: m.code(), name: m.name(), href: root + p, sec: f.secs.get(m.code()) ?? "" });
+        }
+    }
+    chrome::lang_menu_for(l, items, "")
 }
 
 /// The version menu's items: each released version and dev, linking to
 /// this page in it (to its docs home from a 404 page). search.js sends a
 /// reader to the section's start when that version lacks the page.
 fn vers_items(site: Site, root: str, out: str, lost: bool) -> str {
-    let ko = out.starts_with("ko/");
-    let page = if lost { in_lang("index.html", ko) } else { out };
+    let l = lang::of_path(out);
+    let page = if lost { l.path("index.html") } else { out };
     let b = StrBuf::new();
     let item = |dir: str, label: str, note: str| {
         let cur = if dir == site.version { " aria-current=\"true\"" } else { "" };
@@ -824,11 +930,11 @@ fn vers_items(site: Site, root: str, out: str, lost: bool) -> str {
     };
     for r in site.released {
         let patch = site.patches.get(r) ?? "";
-        let old = tr(ko, "unsupported", "지원 종료");
+        let old = tr(l, "unsupported", "지원 종료", "不再支持", "已停止支援");
         let note = if r == site.newest { if patch.is_empty() { "latest" } else { patch + " · latest" } } else if patch.is_empty() { old } else { patch + " · " + old };
         item(r, "v" + r, note);
     }
-    item("dev", "dev", tr(ko, "main branch", "main 브랜치"));
+    item("dev", "dev", tr(l, "main branch", "main 브랜치", "main 分支", "main 分支"));
     b.to_str()
 }
 
@@ -839,33 +945,36 @@ fn ver_suffix(site: Site) -> str {
     if site.version == "dev" { " (dev)" } else { f" (v{site.version})" }
 }
 
+/// "Nabi Docs" in `l`.
+fn docs_name(l: Lang) -> str { tr(l, "Nabi Docs", "Nabi 문서", "Nabi 文档", "Nabi 文件") }
+
 fn frame(site: Site, root: str, f: Frag, banner: str) -> str {
     let out = f.out;
     // A package's docs (pkgdocs): versioned by the package, outside the
     // toolchain's version directories, in English only.
     let pkg = !f.pkg_ver.is_empty();
-    let ko = out.starts_with("ko/");
-    let at = if ko { out["ko/".len():] } else { out };
+    let (l, at) = lang::split(out);
     let lost = at == "404.html";
-    let (sec, sec_en, sec_ko, sec_index) = section(at);
+    let s = section(at);
+    let sec = s.key;
     let nav = StrBuf::new();
-    for (key, en, kr, href) in SECTIONS {
-        if key == "errors" && site.no_errors { continue; }
-        nav.push_str(nav_item(root + in_lang(href, ko), tr(ko, en, kr), sec == key));
+    for x in SECTIONS {
+        if x.key == "errors" && site.no_errors { continue; }
+        nav.push_str(nav_item(root + l.path(x.index), x.name(l), sec == x.key));
     }
-    let name = tr(ko, "Nabi Docs", "Nabi 문서");
+    let name = docs_name(l);
     let full = (if at == "index.html" { name } else { f.title + " - " + name }) + (if pkg { "" } else { ver_suffix(site) });
-    // A package's docs are English: in its Korean chrome only the header
-    // and the footer are Korean.
-    let inner = ko && !pkg;
-    let contents = tr(inner, "Contents", "목차");
-    let on_this = tr(inner, "On this page", "이 페이지의 내용");
+    // A package's docs are English: in another language's chrome only
+    // the header and the footer are in it.
+    let inner = if pkg { Lang::En } else { l };
+    let contents = tr(inner, "Contents", "목차", "目录", "目錄");
+    let on_this = tr(inner, "On this page", "이 페이지의 내용", "本页内容", "本頁內容");
     // On narrow screens the sidebar is a drawer, opened from a bar in
     // the sticky header (search.js).
     let (aside, bar) = if f.side.is_empty() {
         ("", "")
     } else {
-        (f"<nav id=\"side\" class=\"side\" aria-label=\"{contents}\"><div class=\"side-h\"><p class=\"t-label\">{contents}</p><button class=\"ib side-close\" type=\"button\" aria-label=\"{tr(inner, "Close contents", "목차 닫기")}\">{ICON_CLOSE}</button></div>{f.side}</nav>\n", f"<div class=\"cbar\"><button class=\"side-toggle\" type=\"button\" aria-controls=\"side\" aria-expanded=\"false\">{ICON_SIDE}{tr(ko, "Contents", "목차")}</button></div>\n")
+        (f"<nav id=\"side\" class=\"side\" aria-label=\"{contents}\"><div class=\"side-h\"><p class=\"t-label\">{contents}</p><button class=\"ib side-close\" type=\"button\" aria-label=\"{tr(inner, "Close contents", "목차 닫기", "关闭目录", "關閉目錄")}\">{ICON_CLOSE}</button></div>{f.side}</nav>\n", f"<div class=\"cbar\"><button class=\"side-toggle\" type=\"button\" aria-controls=\"side\" aria-expanded=\"false\">{ICON_SIDE}{tr(l, "Contents", "목차", "目录", "目錄")}</button></div>\n")
     };
     let on_page = if f.toc.is_empty() { "" } else { f"<aside class=\"toc\" aria-label=\"{on_this}\"><p class=\"t-label\">{on_this}</p><ul>{f.toc}</ul></aside>\n" };
     // Below the wide layout's "On this page" column: the same list,
@@ -878,33 +987,34 @@ fn frame(site: Site, root: str, f: Frag, banner: str) -> str {
         f.body
     };
     let kind = if at == "index.html" { "home" } else if f.side.is_empty() { "doc wide" } else { "doc" };
+    let crumb_word = tr(l, "Breadcrumb", "이동 경로", "当前位置", "目前位置");
     // One line says where the page is: its section and, in the guide,
     // the chapter. The language menu is in the header.
     let crumb = if !f.trail.is_empty() {
-        if inner { f.trail.replace("aria-label=\"Breadcrumb\"", "aria-label=\"이동 경로\"") } else { f.trail }
-    } else if sec.is_empty() || at == sec_index || lost {
+        if inner.is_en() { f.trail } else { f.trail.replace("aria-label=\"Breadcrumb\"", f"aria-label=\"{crumb_word}\"") }
+    } else if sec.is_empty() || at == s.index || lost {
         ""
     } else {
         let (no, _) = split_no(f.title);
         let sep = "<span class=\"sep\" aria-hidden=\"true\">/</span>";
         let chap = if sec == "guide" && !no.is_empty() {
-            f"{sep}<span aria-current=\"page\">{tr(ko, "Chapter " + no, no + "장")}</span>"
+            f"{sep}<span aria-current=\"page\">{chapter_no(l, no)}</span>"
         } else if !f.crumb.is_empty() {
             f"{f.crumb}{sep}<span class=\"here\" aria-current=\"page\">{esc(f.title)}</span>"
         } else {
             ""
         };
-        f"<nav class=\"crumb\" aria-label=\"{tr(ko, "Breadcrumb", "이동 경로")}\"><a href=\"{root}{in_lang(sec_index, ko)}\">{tr(ko, sec_en, sec_ko)}</a>{chap}</nav>"
+        f"<nav class=\"crumb\" aria-label=\"{crumb_word}\"><a href=\"{root}{l.path(s.index)}\">{s.name(l)}</a>{chap}</nav>"
     };
-    let switch = if lost { "" } else if pkg { pkg_switch(out, ko) } else { lang_switch(root, at, ko, f.alt, f.sec) };
+    let switch = if lost { "" } else if pkg { pkg_switch(out, l) } else { lang_switch(root, at, l, f) };
     let pagehead = if crumb.is_empty() { "" } else { f"<div class=\"pagehead\">{crumb}</div>\n" };
-    let lang = if ko { "ko" } else { "en" };
+    let code = l.code();
     let desc = esc(describe(site, out, body));
-    // A 404 page has no address of its own; the Korean API pages are the
-    // English ones in Korean chrome, so they name those.
-    let url = if pkg { site.docs_url + url::canon("/" + out) } else if lost { "" } else if ko && at.starts_with("std/") { latest(site, at) } else { latest(site, if at == "index.html" && !ko { "" } else { out }) };
-    // Unreleased docs, and Korean pages still in English, stay out of
-    // search engines.
+    // A 404 page has no address of its own; the API pages in another
+    // language are the English ones in its chrome, so they name those.
+    let url = if pkg { site.docs_url + url::canon("/" + out) } else if lost { "" } else if !l.is_en() && at.starts_with("std/") { latest(site, at) } else { latest(site, if at == "index.html" && l.is_en() { "" } else { out }) };
+    // Unreleased docs, and pages in another language still in English,
+    // stay out of search engines.
     let robots = if (site.version == "dev" && !pkg) || f.noindex { "<meta name=\"robots\" content=\"noindex\">\n" } else { "" };
     let ver = if site.version == "dev" { "dev" } else { "v" + site.version };
     // Absolute: the footer is the same on every site, and its links go
@@ -912,57 +1022,61 @@ fn frame(site: Site, root: str, f: Frag, banner: str) -> str {
     let links = chrome::Links { home: site.base_url + "/", docs: f"{site.docs_url}/{if pkg { "latest" } else { site.version }}/", docs_host: site.docs_url + "/", registry: site.packages + "/", playground: site.playground + "/" };
     let play = if !site.newest.is_empty() && site.version == site.newest { esc(site.playground) } else { "" };
     let pname = pkg_name(out);
-    let (skip, menu, sections, find, results, version) = if ko {
-        ("본문으로 건너뛰기", "메뉴", "섹션", "문서 검색", "검색 결과", "문서 버전")
-    } else {
-        ("Skip to content", "Menu", "Sections", "Search docs", "Search results", "Docs version")
-    };
+    let skip = l.words().skip;
+    let menu = menu_word(l);
+    let sections = tr(l, "Sections", "섹션", "文档分区", "文件分區");
+    let find = tr(l, "Search docs", "문서 검색", "搜索文档", "搜尋文件");
+    let results = tr(l, "Search results", "검색 결과", "搜索结果", "搜尋結果");
+    let version = tr(l, "Docs version", "문서 버전", "文档版本", "文件版本");
     // A package's docs search that package; the index, every package.
-    let sfind = if !pkg { find } else if pname.is_empty() { tr(ko, "Search packages", "패키지 검색") } else { tr(ko, f"Search {pname}", f"{pname} 검색") };
-    let note = if at.starts_with("spec/") { tr(ko, "<span>Spec text © 2026 DaminStudio and the Nabi contributors, <a href=\"https://creativecommons.org/licenses/by/4.0/\">CC BY 4.0</a></span>", "<span>사양 본문 © 2026 DaminStudio and the Nabi contributors, <a href=\"https://creativecommons.org/licenses/by/4.0/\">CC BY 4.0</a></span>") } else { "" };
+    let sfind = if !pkg { find } else if pname.is_empty() { tr(l, "Search packages", "패키지 검색", "搜索包", "搜尋套件") } else { tr(l, f"Search {pname}", f"{pname} 검색", f"搜索 {pname}", f"搜尋 {pname}") };
+    let cc = "© 2026 DaminStudio and the Nabi contributors, <a href=\"https://creativecommons.org/licenses/by/4.0/\">CC BY 4.0</a>";
+    let note = if at.starts_with("spec/") { "<span>" + tr(l, "Spec text ", "사양 본문 ", "规范文本 ", "規格內文 ") + cc + "</span>" } else { "" };
     let img = if pkg { site.base_url + "/og.png" + (if site.og.is_empty() { "" } else { "?v=" + site.og }) } else { og_image(site, f) };
+    let home = latest(site, l.dir());
     // Structured data: the docs home is a site with a search, every other
     // page sits in a trail from it.
     let ld = if lost { "" } else if at == "index.html" && !pkg {
-        json_ld(web_site(tr(ko, "Nabi Docs", "Nabi 문서"), latest(site, if ko { "ko/" } else { "" }), latest(site, if ko { "ko/" } else { "" }) + "?q={search_term_string}", ko))
+        json_ld(web_site(name, home, home + "?q={search_term_string}", l))
     } else {
-        let trail: List<(str, str)> = [(tr(ko, "Nabi Docs", "Nabi 문서"), latest(site, if ko { "ko/" } else { "" }))].to_list();
+        let trail: List<(str, str)> = [(name, home)].to_list();
         if pkg {
-            trail.push((tr(ko, "Package docs", "패키지 문서"), site.docs_url + (if ko { "/ko" } else { "" }) + "/packages"));
-        } else if !sec.is_empty() && at != sec_index {
-            trail.push((tr(ko, sec_en, sec_ko), latest(site, in_lang(sec_index, ko))));
+            trail.push((l.words().package_docs, site.docs_url + (if l.is_en() { "" } else { "/" + l.slug() }) + "/packages"));
+        } else if !sec.is_empty() && at != s.index {
+            trail.push((s.name(l), latest(site, l.path(s.index))));
         }
         trail.push((f.title, url));
         json_ld(breadcrumbs(trail))
     };
     let alt = if img.contains("/og/") { if f.title == name { name } else { f.title + " - " + name } } else { pkg::headline(site) };
+    let all_label = tr(l, "Search all packages on the registry →", "레지스트리에서 모든 패키지 찾기 →", "在注册表中搜索所有包 →", "在套件庫中搜尋所有套件 →");
     f"<!doctype html>
-<html class=\"nb lt\" lang=\"{lang}\">
+<html class=\"nb lt\" lang=\"{code}\">
 <head>
-{head(site, root, full, desc, url, img, alt, robots + f.head + ld, ko)}</head>
-<body class=\"{kind}\" data-root=\"{root}\" data-registry=\"{esc(site.packages)}\"{if pkg { f" data-search=\"/{esc(pkg_base(out))}\" data-all=\"{esc(site.packages)}/packages?q=\" data-all-label=\"{tr(ko, "Search all packages on the registry →", "레지스트리에서 모든 패키지 찾기 →")}\"" } else { "" }} data-version=\"{if pkg { "" } else { esc(site.version) }}\" data-play=\"{play}\">
+{head(site, root, full, desc, url, img, alt, robots + f.head + ld, l)}</head>
+<body class=\"{kind}\" data-root=\"{root}\" data-registry=\"{esc(site.packages)}\"{if pkg { f" data-search=\"/{esc(pkg_base(out))}\" data-all=\"{esc(site.packages)}/packages?q=\" data-all-label=\"{all_label}\"" } else { "" }} data-version=\"{if pkg { "" } else { esc(site.version) }}\" data-play=\"{play}\">
 <a class=\"skip\" href=\"#content\">{skip}</a>
-<header class=\"hdr top{if pkg { " pkg-hdr" } else { "" }}\" lang=\"{lang}\">
+<header class=\"hdr top{if pkg { " pkg-hdr" } else { "" }}\" lang=\"{code}\">
 <div class=\"in\">
-{if pkg { pkg_bar(site, f, ko) } else { f"<a class=\"brand\" href=\"{root}{in_lang("index.html", ko)}\" lang=\"en\">{web::chrome::wordmark("Nabi")}<span class=\"sl\" aria-hidden=\"true\">/</span><span class=\"site\">docs</span></a>\n{TOGGLE.replace("aria-label=\"Menu\"", f"aria-label=\"{menu}\"")}\n<nav id=\"nav\" class=\"nav main-nav\" aria-label=\"{sections}\">{nav.to_str()}</nav>" }}
+{if pkg { pkg_bar(site, f, l) } else { f"<a class=\"brand\" href=\"{root}{l.path("index.html")}\" lang=\"en\">{web::chrome::wordmark("Nabi")}<span class=\"sl\" aria-hidden=\"true\">/</span><span class=\"site\">docs</span></a>\n{TOGGLE.replace("aria-label=\"Menu\"", f"aria-label=\"{menu}\"")}\n<nav id=\"nav\" class=\"nav main-nav\" aria-label=\"{sections}\">{nav.to_str()}</nav>" }}
 <div class=\"tools\">
 <div class=\"search\" role=\"search\"><button type=\"button\" class=\"s-open\" aria-label=\"{sfind}\" tabindex=\"-1\" aria-hidden=\"true\">{ICON_SEARCH}</button><input id=\"q\" type=\"search\" placeholder=\"{sfind}\" aria-label=\"{sfind}\" aria-keyshortcuts=\"/\" autocomplete=\"off\" role=\"combobox\" aria-autocomplete=\"list\" aria-expanded=\"false\" aria-controls=\"results\"><kbd class=\"kbd\" aria-hidden=\"true\">/</kbd><ul id=\"results\" class=\"results appear\" role=\"listbox\" aria-label=\"{results}\" hidden></ul><p class=\"sr-only\" role=\"status\"></p></div>
 {if pkg { "" } else { f"<details class=\"vers\"><summary aria-label=\"{version}: {ver}\">{ver}</summary><ul class=\"vers-menu\">{vers_items(site, root, out, lost)}</ul></details>" }}
 {switch}
-{chrome::theme_button(ko)}
+{chrome::theme_button_for(l)}
 </div>
 </div>
 {bar}</header>
-{banner}<div class=\"shell\"{if pkg && ko { " lang=\"en\"" } else { "" }}>
+{banner}<div class=\"shell\"{if pkg && !l.is_en() { " lang=\"en\"" } else { "" }}>
 {aside}<main id=\"content\" class=\"main\">
 <article class=\"prose\">
 {pagehead}{body}{f.pager}
 </article>
 {on_page}</main>
 </div>
-{footer(site, links, note, root + "logo.svg", ko, "docs")}<script src=\"{asset(site, root, "keys.js")}\" defer></script>
+{footer(site, links, note, root + "logo.svg", l, "docs")}<script src=\"{asset(site, root, "keys.js")}\" defer></script>
 <script src=\"{asset(site, root, "copy.js")}\" defer></script>
-{chrome::palette_script(asset(site, root, "palette.js"), chrome::Palette { pkgdocs: if ko { "/ko/packages/" } else { "/packages/" }, registry: site.packages })}<script src=\"{asset(site, root, "search.js")}\" defer></script>
+{chrome::palette_script(asset(site, root, "palette.js"), chrome::Palette { pkgdocs: "/" + l.dir() + "packages/", registry: site.packages })}<script src=\"{asset(site, root, "search.js")}\" defer></script>
 </body>
 </html>
 "
@@ -971,10 +1085,10 @@ fn frame(site: Site, root: str, f: Frag, banner: str) -> str {
 /// `obj` (JSON) as a page's structured data, for `<head>`.
 pub fn json_ld(obj: str) -> str { f"<script type=\"application/ld+json\">{obj.replace("</", "<\\/")}</script>\n" }
 
-/// schema.org WebSite `name` at `url`, searched at `search` (its
+/// schema.org WebSite `name` at `url` in `l`, searched at `search` (its
 /// `{search_term_string}` the query).
-pub fn web_site(name: str, url: str, search: str, ko: bool) -> str {
-    f"{{\"@context\":\"https://schema.org\",\"@type\":\"WebSite\",\"name\":{json_str(name)},\"url\":{json_str(url)},\"inLanguage\":\"{if ko { "ko" } else { "en" }}\",\"potentialAction\":{{\"@type\":\"SearchAction\",\"target\":{{\"@type\":\"EntryPoint\",\"urlTemplate\":{json_str(search)}}},\"query-input\":\"required name=search_term_string\"}}}}"
+pub fn web_site(name: str, url: str, search: str, l: Lang) -> str {
+    f"{{\"@context\":\"https://schema.org\",\"@type\":\"WebSite\",\"name\":{json_str(name)},\"url\":{json_str(url)},\"inLanguage\":\"{l.code()}\",\"potentialAction\":{{\"@type\":\"SearchAction\",\"target\":{{\"@type\":\"EntryPoint\",\"urlTemplate\":{json_str(search)}}},\"query-input\":\"required name=search_term_string\"}}}}"
 }
 
 /// schema.org BreadcrumbList of `trail`, each `(name, url)`.
@@ -987,43 +1101,54 @@ pub fn breadcrumbs(trail: List<(str, str)>) -> str {
 }
 
 /// schema.org SoftwareApplication of the toolchain at its release.
-pub fn software(site: Site, ko: bool) -> str {
-    let dl = site.base_url + (if ko { "/ko" } else { "" }) + "/download";
-    let desc = if ko { DESC_KO } else { site.description };
+pub fn software(site: Site, l: Lang) -> str {
+    let dl = site.base_url + (if l.is_en() { "" } else { "/" + l.slug() }) + "/download";
+    let desc = description(site, l);
     f"{{\"@context\":\"https://schema.org\",\"@type\":\"SoftwareApplication\",\"name\":\"Nabi\",\"description\":{json_str(desc)},\"url\":{json_str(site.base_url + "/")},\"applicationCategory\":\"DeveloperApplication\",\"operatingSystem\":\"macOS, Windows, Linux, FreeBSD\",\"softwareVersion\":{json_str(site.release)},\"downloadUrl\":{json_str(dl)},\"license\":\"https://github.com/nabi-lang/nabi/blob/main/LICENSE-MIT\",\"offers\":{{\"@type\":\"Offer\",\"price\":\"0\",\"priceCurrency\":\"USD\"}},\"author\":{{\"@type\":\"Organization\",\"name\":\"DaminStudio\",\"url\":\"https://daminstudio.com\"}}}}"
 }
 
 /// A page of the home site (nabi-lang.org): no search, its nav into the
 /// newest docs. The landing page (`index.html`) brings its own layout.
-pub fn www_page(site: Site, out: str, title: str, body: str) -> str { www_page_with(site, out, title, body, "") }
+pub fn www_page(site: Site, out: str, title: str, body: str) -> str { www_page_with(site, out, title, body, "", lang::ALL.to_list()) }
 
-/// www_page with `more` in `<head>` (a robots line).
-pub fn www_page_with(site: Site, out: str, title: str, body: str, more: str) -> str {
-    // A Korean page is `ko/<page>`; `at` is the page either way.
-    let ko = out.starts_with("ko/");
-    let at = if ko { out["ko/".len():] } else { out };
+/// www_page with `more` in `<head>` (a robots line), the page written in
+/// each of `real` (its hreflang links; the others show English).
+pub fn www_page_with(site: Site, out: str, title: str, body: str, more: str, real: List<Lang>) -> str {
+    // A page in another language is `<lang>/<page>`; `at` is the page
+    // either way.
+    let (l, at) = lang::split(out);
     let root = if out == "404.html" { "/" } else { root_of(out) };
-    let home = root + if ko { "ko/" } else { "" };
-    let d = |p: str| latest(site, if ko { "ko/" + p } else { p });
+    let home = root + l.dir();
+    let d = |p: str| latest(site, l.path(p));
+    let w = l.words();
     let nav = StrBuf::new();
-    nav.push_str(nav_item(esc(d("learn/index.html")), tr(ko, "Guide", "가이드"), false));
-    nav.push_str(nav_item(esc(d("index.html")), tr(ko, "Docs", "문서"), false));
-    nav.push_str(nav_item(esc(d("examples/index.html")), tr(ko, "Examples", "예제"), false));
-    nav.push_str(nav_item(esc(site.playground), tr(ko, "Playground", "플레이그라운드"), false));
-    nav.push_str(nav_item(esc(site.packages), tr(ko, "Packages", "패키지"), false));
-    nav.push_str(nav_item(home + "roadmap.html", tr(ko, "Roadmap", "로드맵"), at == "roadmap.html"));
-    nav.push_str(nav_item(home + "community.html", tr(ko, "Community", "커뮤니티"), at == "community.html"));
+    nav.push_str(nav_item(esc(d("learn/index.html")), w.guide, false));
+    nav.push_str(nav_item(esc(d("index.html")), w.docs, false));
+    nav.push_str(nav_item(esc(d("examples/index.html")), w.examples, false));
+    nav.push_str(nav_item(esc(site.playground), w.playground, false));
+    nav.push_str(nav_item(esc(site.packages), w.packages, false));
+    nav.push_str(nav_item(home + "roadmap.html", w.roadmap, at == "roadmap.html"));
+    nav.push_str(nav_item(home + "community.html", w.community, at == "community.html"));
     // "Download Nabi" is "Download - Nabi", not "Download Nabi - Nabi".
     let short = title.strip_suffix(" " + site.title) ?? title;
-    let full = if at == "index.html" { if ko { f"{site.title}: {TAGLINE_KO}" } else { pkg::headline(site) } } else { short + " - " + site.title };
-    let page_url = |o: str| if o == "index.html" { site.base_url + "/" } else if o == "ko/index.html" { site.base_url + "/ko" } else { site.base_url + "/" + url::canon(o) };
+    let full = if at == "index.html" { if l.is_en() { pkg::headline(site) } else { f"{site.title}: {tagline(site, l)}" } } else { short + " - " + site.title };
+    let page_url = |o: str| {
+        let (ol, oat) = lang::split(o);
+        if oat == "index.html" { site.base_url + "/" + ol.slug() } else { site.base_url + "/" + url::canon(o) }
+    };
     let url = if out == "404.html" { "" } else { page_url(out) };
-    // Both languages of a page link to each other; the switch sits in
-    // the header.
+    // A page's editions in their languages link to each other; the
+    // switch in the header lists every language.
     let (alt_head, switch) = if out == "404.html" { ("", "") } else {
-        let en_url = esc(page_url(at));
-        let ko_url = esc(page_url("ko/" + at));
-        (f"<link rel=\"alternate\" hreflang=\"en\" href=\"{en_url}\">\n<link rel=\"alternate\" hreflang=\"ko\" href=\"{ko_url}\">\n<link rel=\"alternate\" hreflang=\"x-default\" href=\"{en_url}\">\n<link rel=\"alternate\" type=\"application/atom+xml\" title=\"{tr(ko, "Nabi news", "Nabi 소식")}\" href=\"{esc(site.base_url)}/{if ko { "ko/" } else { "" }}news/feed.xml\">\n", lang_switch(root, at, ko, if ko { at } else { "ko/" + at }, ""))
+        let b = StrBuf::new();
+        if real.contains(l) {
+            for m in lang::ALL {
+                if real.contains(m) { b.push_str(f"<link rel=\"alternate\" hreflang=\"{m.code()}\" href=\"{esc(page_url(m.path(at)))}\">\n"); }
+            }
+            b.push_str(f"<link rel=\"alternate\" hreflang=\"x-default\" href=\"{esc(page_url(at))}\">\n");
+        }
+        b.push_str(f"<link rel=\"alternate\" type=\"application/atom+xml\" title=\"{tr(l, "Nabi news", "Nabi 소식", "Nabi 动态", "Nabi 最新消息")}\" href=\"{esc(site.base_url)}/{l.dir()}news/feed.xml\">\n");
+        (b.to_str(), chrome::lang_menu_for(l, chrome::menu_items(l, |m| root + m.path(at)), ""))
     };
     let kind = if at == "index.html" { "landing" } else { "plain" };
     // A page www_desc has no words for (a news post) is described by
@@ -1040,38 +1165,38 @@ pub fn www_page_with(site: Site, out: str, title: str, body: str, more: str) -> 
     } else {
         site.base_url + "/og.png" + (if site.og.is_empty() { "" } else { "?v=" + site.og })
     };
-    let lang = if ko { "ko" } else { "en" };
+    let code = l.code();
     // Structured data: the site with its search (the docs'), and the
     // toolchain on the landing and download pages.
     let ld = if at == "index.html" {
-        json_ld(web_site(site.title, page_url(out), latest(site, if ko { "ko/" } else { "" }) + "?q={search_term_string}", ko)) + json_ld(software(site, ko))
-    } else if at == "download.html" { json_ld(software(site, ko)) } else { "" };
+        json_ld(web_site(site.title, page_url(out), latest(site, l.dir()) + "?q={search_term_string}", l)) + json_ld(software(site, l))
+    } else if at == "download.html" { json_ld(software(site, l)) } else { "" };
     let extra = more + (if at == "index.html" { alt_head + f"<link rel=\"me\" href=\"{chrome::MASTODON}\">\n" } else { alt_head }) + ld;
     f"<!doctype html>
-<html class=\"nb lt\" lang=\"{lang}\">
+<html class=\"nb lt\" lang=\"{code}\">
 <head>
-{head(site, root, full, desc, url, img, pkg::headline(site), extra, ko)}</head>
+{head(site, root, full, desc, url, img, pkg::headline(site), extra, l)}</head>
 <body class=\"{kind} www\" data-root=\"{root}\" data-play=\"{esc(site.playground)}\">
-<a class=\"skip\" href=\"#content\">{tr(ko, "Skip to content", "본문으로 건너뛰기")}</a>
-<header class=\"hdr top\" lang=\"{lang}\">
+<a class=\"skip\" href=\"#content\">{w.skip}</a>
+<header class=\"hdr top\" lang=\"{code}\">
 <div class=\"frame in\">
-<a class=\"brand\" href=\"{home}index.html\">{web::chrome::wordmark(tr(ko, "Nabi home", "Nabi 홈"))}</a>
-{TOGGLE.replace("aria-label=\"Menu\"", f"aria-label=\"{tr(ko, "Menu", "메뉴")}\"")}
-<nav id=\"nav\" class=\"nav main-nav\" aria-label=\"{tr(ko, "Main", "주 메뉴")}\">{nav.to_str()}</nav>
+<a class=\"brand\" href=\"{home}index.html\">{web::chrome::wordmark(tr(l, "Nabi home", "Nabi 홈", "Nabi 首页", "Nabi 首頁"))}</a>
+{TOGGLE.replace("aria-label=\"Menu\"", f"aria-label=\"{menu_word(l)}\"")}
+<nav id=\"nav\" class=\"nav main-nav\" aria-label=\"{tr(l, "Main", "주 메뉴", "主菜单", "主選單")}\">{nav.to_str()}</nav>
 <div class=\"tools\">
-{chrome::palette_button(ko)}
+{chrome::palette_button_for(l)}
 <a class=\"gh\" href=\"https://github.com/nabi-lang/nabi\">GitHub</a>
-<a class=\"btn btn-sm\" href=\"{home}download.html\"{install}>{tr(ko, "Install", "설치")}</a>
+<a class=\"btn btn-sm\" href=\"{home}download.html\"{install}>{tr(l, "Install", "설치", "安装", "安裝")}</a>
 {switch}
-{chrome::theme_button(ko)}
+{chrome::theme_button_for(l)}
 </div>
 </div>
 </header>
 <main id=\"content\">
 {main}</main>
-{footer(site, links, "", root + "logo.svg", ko, "home")}<script src=\"{asset(site, root, "keys.js")}\" defer></script>
+{footer(site, links, "", root + "logo.svg", l, "home")}<script src=\"{asset(site, root, "keys.js")}\" defer></script>
 <script src=\"{asset(site, root, "copy.js")}\" defer></script>
-{chrome::palette_script(asset(site, root, "palette.js"), chrome::Palette { docs: site.docs_url + "/latest/", pkgdocs: site.docs_url + (if ko { "/ko" } else { "" }) + "/packages/", registry: site.packages })}<script src=\"{asset(site, root, "search.js")}\" defer></script>
+{chrome::palette_script(asset(site, root, "palette.js"), chrome::Palette { docs: site.docs_url + "/latest/", pkgdocs: site.docs_url + (if l.is_en() { "" } else { "/" + l.slug() }) + "/packages/", registry: site.packages })}<script src=\"{asset(site, root, "search.js")}\" defer></script>
 </body>
 </html>
 "
@@ -1080,21 +1205,21 @@ pub fn www_page_with(site: Site, out: str, title: str, body: str, more: str) -> 
 /// Body of a 404 page: one sentence (search.js names the path), a search
 /// field that opens the docs search, and where to go instead. `to(p)` is
 /// the address of docs page `p`.
-pub fn not_found(to: fn(str) -> str, ko: bool, no_errors: bool) -> str {
+pub fn not_found(to: fn(str) -> str, l: Lang, no_errors: bool) -> str {
     let links = StrBuf::new();
-    links.push_str(f"<li><a href=\"{esc(to("index.html"))}\">{tr(ko, "Docs home", "문서 홈")}</a></li>");
-    for (key, en, kr, href) in SECTIONS {
-        if key == "errors" && no_errors { continue; }
-        links.push_str(f"<li><a href=\"{esc(to(href))}\">{tr(ko, en, kr)}</a></li>"); }
-    let find = tr(ko, "Search the docs", "문서 검색");
+    links.push_str(f"<li><a href=\"{esc(to("index.html"))}\">{tr(l, "Docs home", "문서 홈", "文档首页", "文件首頁")}</a></li>");
+    for x in SECTIONS {
+        if x.key == "errors" && no_errors { continue; }
+        links.push_str(f"<li><a href=\"{esc(to(x.index))}\">{x.name(l)}</a></li>"); }
+    let find = tr(l, "Search the docs", "문서 검색", "搜索文档", "搜尋文件");
     // A form's action is no href, so site_hrefs leaves it: canonical here.
     let home = to("index.html");
     let action = if home.starts_with("/") { url::canon(home) } else { home };
     f"<div class=\"lost\">
-<h1>{tr(ko, "Page not found", "페이지를 찾을 수 없습니다")}</h1>
-<p class=\"lead\">{tr(ko, "There is no page at <code id=\"lost-path\">this address</code>.", "<code id=\"lost-path\">이 주소</code>에는 페이지가 없습니다.")}</p>
+<h1>{l.words().not_found}</h1>
+<p class=\"lead\">{tr(l, "There is no page at <code id=\"lost-path\">this address</code>.", "<code id=\"lost-path\">이 주소</code>에는 페이지가 없습니다.", "<code id=\"lost-path\">此地址</code>没有页面。", "<code id=\"lost-path\">這個網址</code>沒有頁面。")}</p>
 <p class=\"lost-hint\" hidden></p>
-<form class=\"lost-find\" action=\"{esc(action)}\" method=\"get\" role=\"search\"><label class=\"lost-q\">{ICON_SEARCH}<input name=\"q\" type=\"search\" placeholder=\"{find}\" aria-label=\"{find}\" autocomplete=\"off\"></label><button class=\"btn-2\" type=\"submit\">{tr(ko, "Search", "검색")}</button></form>
+<form class=\"lost-find\" action=\"{esc(action)}\" method=\"get\" role=\"search\"><label class=\"lost-q\">{ICON_SEARCH}<input name=\"q\" type=\"search\" placeholder=\"{find}\" aria-label=\"{find}\" autocomplete=\"off\"></label><button class=\"btn-2\" type=\"submit\">{l.words().search}</button></form>
 <ul class=\"lost-links\">{links.to_str()}</ul>
 </div>
 "

@@ -4,6 +4,7 @@
 use pkg::Page;
 use pkg::layout;
 use web::build::{between, json_str};
+use web::lang;
 use web::url;
 
 /// The first paragraph after each `##` / `###` heading of `html`, as
@@ -58,7 +59,7 @@ pub fn index(groups: [List<Page>; 3]) -> str {
         for p in group {
             // A docs home is the version's start, not a hit; a package's
             // root module (src "pkg") is.
-            if (p.out == "index.html" || p.out == "ko/index.html") && p.src != "pkg" { continue; }
+            if lang::split(p.out).1 == "index.html" && p.src != "pkg" { continue; }
             if n > 0 { pl.push_str(",\n"); }
             let lead = clip_text(layout::lead_text(p.html), 110);
             pl.push_str(f"[{json_str(p.title)},{json_str(url::canon(p.out))},{json_str(lead)}]");
@@ -109,13 +110,40 @@ fn bare(w: str) -> str {
     w
 }
 
+/// A Han character: the CJK ideographs, extension A and the
+/// compatibility ones (search.tsx's HAN).
+pub fn is_han(c: char) -> bool {
+    (c >= '\u{3400}' && c <= '\u{4DBF}') || (c >= '\u{4E00}' && c <= '\u{9FFF}') || (c >= '\u{F900}' && c <= '\u{FAFF}')
+}
+
+/// A run of Han text as the index holds it, Chinese having no spaces:
+/// every two characters side by side, and the last character alone, so
+/// that a query of one character (a prefix) finds each place it is.
+fn han_words(run: str, into: Set<str>) {
+    let cs: List<char> = List::new();
+    for c in run.chars() { cs.push(c); }
+    for k in 0..cs.len() {
+        let b = StrBuf::new();
+        b.push(cs[k]);
+        if k + 1 < cs.len() { b.push(cs[k + 1]); }
+        into.insert(b.to_str());
+    }
+}
+
 /// The words of plain text `s`: letters, digits and `_`, lowercased;
-/// Hangul words bare of their particle; one or two Latin letters, bare
-/// numbers and stop words left out.
+/// Hangul words bare of their particle; Han runs as han_words; one or two
+/// Latin letters, bare numbers and stop words left out.
 fn words(s: str, stop: Set<str>, into: Set<str>) {
     let w = StrBuf::new();
+    let han = StrBuf::new();
     for c in (s + " ").chars() {
-        if c.is_alphanumeric() || c == '_' {
+        if is_han(c) {
+            han.push(c);
+        } else if !han.is_empty() {
+            han_words(han.to_str(), into);
+            han = StrBuf::new();
+        }
+        if !is_han(c) && (c.is_alphanumeric() || c == '_') {
             w.push(c);
             continue;
         }
@@ -184,7 +212,7 @@ pub fn text_index(groups: [List<Page>; 3], with_text: usize) -> str {
     for group in groups {
         gi += 1;
         for p in group {
-            if p.out == "index.html" || p.out == "ko/index.html" { continue; }
+            if lang::split(p.out).1 == "index.html" { continue; }
             if gi > with_text {
                 // An API item gives the words of its summary, so a query
                 // finds what it does as well as its name.
@@ -225,8 +253,10 @@ pub fn text_index(groups: [List<Page>; 3], with_text: usize) -> str {
     }
     let total = np + nh;
     let keys: List<str> = List::new();
+    // A Han pair stays however common: a query is cut into pairs, each of
+    // which has to be found.
     for w in post.keys() {
-        if post[w].len() * 5 <= total { keys.push(w); }
+        if post[w].len() * 5 <= total || is_han(w.chars().next() ?? ' ') { keys.push(w); }
     }
     keys.sort();
     let b = StrBuf::new();
@@ -283,8 +313,10 @@ pub fn fields(line: str) -> List<str> | none {
 pub const CHUNK: usize = 256;
 
 /// The text index's files, by the first letter of their words: `a`..`z`,
-/// `0` (digits and `_`), `k0`..`k18` (Hangul, by initial consonant) and
-/// `other`. search.tsx works out the same name for a query word.
+/// `0` (digits and `_`), `k0`..`k18` (Hangul, by initial consonant),
+/// `h0`..`h15` (Han, by code point: 16 equal ranges of the unified
+/// ideographs, the rest of Han in `h15`) and `other`. search.tsx works
+/// out the same name for a query word.
 pub fn shards() -> List<str> {
     let out: List<str> = List::new();
     for c in "abcdefghijklmnopqrstuvwxyz".chars() {
@@ -294,9 +326,14 @@ pub fn shards() -> List<str> {
     }
     out.push("0");
     for k in 0..19 { out.push(f"k{k}"); }
+    for k in 0..HAN_SHARDS { out.push(f"h{k}"); }
     out.push("other");
     out
 }
+
+const HAN_SHARDS: usize = 16;
+/// 0x4E00..0x9FFF in HAN_SHARDS ranges.
+const HAN_SPAN: u32 = 0x520u32;
 
 /// The text index file of word `w` (shards).
 pub fn shard_of(w: str) -> str {
@@ -308,6 +345,8 @@ pub fn shard_of(w: str) -> str {
         }
         if (c >= '0' && c <= '9') || c == '_' { return "0"; }
         if c >= '가' && c <= '힣' { return f"k{((c as u32) - 0xAC00u32) / 588u32}"; }
+        if c >= '\u{4E00}' && c <= '\u{9FFF}' { return f"h{((c as u32) - 0x4E00u32) / HAN_SPAN}"; }
+        if is_han(c) { return f"h{HAN_SHARDS - 1}"; }
         return "other";
     }
     "other"
@@ -422,6 +461,16 @@ fn split_and_merge() {
     assert(s.text[shard_of("타입")].contains("타입") && s.text["0"].contains("_x") && shard_of("타입") == "k16", shard_of("타입"));
     let m = merge([("json/latest/", "{\"p\":[\n[\"json\",\"\",\"x\"],\n[\"json::read\",\"read\",\"y\"]],\n\"h\":[\n[1,\"parse\",\"parse\",0,\"fn\",\"z\"]]}\n"), ("csv/latest/", "{\"p\":[\n[\"csv\",\"\",\"x\"]],\n\"h\":[\n[0,\"Reader\",\"Reader\",0,\"struct\",\"\"]]}\n")]);
     assert(m.contains("[\"json\",\"json/latest\"]") && m.contains("[\"json::read\",\"json/latest/read\"]") && m.contains("[1,\"parse\"") && m.contains("[2,\"Reader\""), m);
+}
+
+#[test]
+fn han_text() {
+    let into: Set<str> = Set::new();
+    words("函数的参数 list的方法 一", stop_words(), into);
+    for w in ["函数", "数的", "的参", "参数", "数", "list", "的方", "方法", "法", "一"] { assert(into.contains(w), w); }
+    assert(!into.contains("函数的参数") && !into.contains("list的方法") && !into.contains("函"), "no whole runs, a first character only in its pair");
+    assert(shard_of("一个") == "h0" && shard_of("龥") == "h15" && shard_of("参数") == f"h{(0x53C2 - 0x4E00) / 0x520}" && shard_of("㐀") == "h15", shard_of("参数"));
+    assert(shards().contains("h15") && !shards().contains("h16"), "shards");
 }
 
 #[test]

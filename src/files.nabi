@@ -1,7 +1,7 @@
 // A version directory as written: its pages, 404 pages, search indexes,
 // llms.txt and the static files (the kit's, its fonts and static/).
 
-use pkg::Site;
+use pkg::{LangIndex, Site};
 use pkg::layout;
 use pkg::links::site_hrefs;
 use pkg::llms;
@@ -11,21 +11,26 @@ use web::build::{dir_of, write};
 use web::kit;
 
 /// The pages of one version directory `dir` (`latest`, `0.1.0`, `dev`)
-/// under `docs_root`, linking within it, with its 404 page, search files
-/// (from the indexes `search` and `search_ko` and the body-text ones in
-/// `text`, English and Korean; search::split) and static files; the
+/// under `docs_root`, linking within it, with a 404 page and search files
+/// for each language of `indexes` (search::split) and static files; the
 /// static names.
-pub fn write_version(site: Site, docs_root: str, dir: str, files: Dict<str, str>, search: str, search_ko: str, text: (str, str), llm: (str, str)) throws -> Set<str> {
+pub fn write_version(site: Site, docs_root: str, dir: str, files: Dict<str, str>, indexes: List<LangIndex>, llm: (str, str)) throws -> Set<str> {
     let vdir = docs_root + "/" + dir;
     if fs::exists(vdir) { try fs::remove_dir_all(vdir); }
     let base = "/" + dir;
     for out in files.keys() { try write(vdir, out, site_hrefs(site, files[out], base, out)); }
-    try write(vdir, "404.html", site_hrefs(site, layout::not_found_page(site, dir, false), base, "404.html"));
-    try write(vdir, "ko/404.html", site_hrefs(site, layout::not_found_page(site, dir, true), base, "ko/404.html"));
+    // English and Korean always have one, as before there were more.
+    let langs: Set<str> = Set::new();
+    for d in ["", "ko/"] { langs.insert(d); }
+    for x in indexes { langs.insert(x.dir); }
+    for d in langs {
+        let l = web::lang::of_path(d);
+        try write(vdir, d + "404.html", site_hrefs(site, layout::not_found_page(site, dir, l), base, d + "404.html"));
+    }
     let statics = try copy_static(vdir);
-    for (lang, idx, words) in [("", search, text.0), ("ko/", search_ko, text.1)] {
-        if idx.is_empty() { continue; }
-        for name in try write_search(vdir, lang, pkg::search::split(idx, words)) { statics.insert(name); }
+    for x in indexes {
+        if x.search.is_empty() { continue; }
+        for name in try write_search(vdir, x.dir, pkg::search::split(x.search, x.text)) { statics.insert(name); }
     }
     if !llm.0.is_empty() {
         let at = site.docs_url + "/" + dir;

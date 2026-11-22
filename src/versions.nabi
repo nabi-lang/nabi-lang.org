@@ -8,7 +8,7 @@ use pkg::layout;
 use pkg::links::{check, site_hrefs};
 use pkg::llms;
 use pkg::www::sitemap;
-use pkg::{Bundle, Site, Versions, wrap};
+use pkg::{Bundle, LangIndex, Site, Versions, wrap};
 use std::fs;
 use std::nabion;
 use web::build::{json_str, write};
@@ -17,10 +17,15 @@ use web::build::{json_str, write};
 /// indexes and llms files.
 pub struct Latest {
     pub pages: Dict<str, str>;
-    pub search: str;
-    pub search_ko: str;
-    pub text: (str, str);
+    pub indexes: List<LangIndex>;
     pub llms: (str, str);
+}
+
+/// A bundle's search indexes, every language's.
+pub fn indexes(b: Bundle) -> List<LangIndex> {
+    let out: List<LangIndex> = [LangIndex { dir: "", search: b.search, text: b.text }, LangIndex { dir: "ko/", search: b.search_ko, text: b.text_ko }].to_list();
+    for x in b.more { out.push(x); }
+    out
 }
 
 /// Release `v`'s bundle in the archive `archive`.
@@ -51,10 +56,10 @@ pub fn rewrap(ref site: Site, vs: Versions, archive: str, docs_root: str, latest
         }
         let vfiles: Dict<str, str> = Dict::new();
         for f in b.pages { vfiles.insert(f.out, wrap(site, f, latest_outs)); }
-        let vstatics = try write_version(site, docs_root, v, vfiles, b.search, b.search_ko, (b.text, b.text_ko), (b.llms, b.llms_full));
+        let vstatics = try write_version(site, docs_root, v, vfiles, indexes(b), (b.llms, b.llms_full));
         try write(docs_root + "/" + v, "og.nabion", try nabion::to_str(layout::cards(b.pages)));
         for bd in check(vfiles, vstatics) { bad.push(f"[{v}] {bd}"); }
-        if v == site.newest { out = Latest { pages: vfiles, search: b.search, search_ko: b.search_ko, text: (b.text, b.text_ko), llms: (b.llms, b.llms_full) }; }
+        if v == site.newest { out = Latest { pages: vfiles, indexes: indexes(b), llms: (b.llms, b.llms_full) }; }
         println(f"docs {v}: {b.pages.len()} pages re-wrapped from archive → {docs_root}/{v}/");
     }
     site.version = version;
@@ -100,7 +105,7 @@ pub fn root(ref site: Site, vs: Versions, docs_root: str, www_dir: str, latest_o
     site.version = if newest.is_empty() { version } else { newest };
     let has = !newest.is_empty() && latest.pages.len() > 0;
     if has {
-        _ = try write_version(site, docs_root, "latest", latest.pages, latest.search, latest.search_ko, latest.text, latest.llms);
+        _ = try write_version(site, docs_root, "latest", latest.pages, latest.indexes, latest.llms);
         if !latest.llms.0.is_empty() {
             let base = site.docs_url + "/latest";
             for dir in [docs_root, www_dir] {
@@ -109,7 +114,7 @@ pub fn root(ref site: Site, vs: Versions, docs_root: str, www_dir: str, latest_o
             }
         }
     }
-    try write(docs_root, "404.html", site_hrefs(site, layout::not_found_page(site, "latest", false), "/latest", "404.html"));
+    try write(docs_root, "404.html", site_hrefs(site, layout::not_found_page(site, "latest", web::lang::Lang::En), "/latest", "404.html"));
     site.version = version;
     has
 }

@@ -5,8 +5,10 @@
 //                   download page (www/download.md) and the
 //                   installers
 //   out/docs/<v>/   docs.nabi-lang.org/<v>/: the spec (English at `spec/`,
-//                   Korean at `ko/spec/`), the guide and examples (docs/)
-//                   and the standard library API, for one version
+//                   the other languages at `ko/spec/`, `zh-hans/spec/`,
+//                   `zh-hant/spec/`), the guide and examples (docs/) and
+//                   the standard library API, for one version, in every
+//                   language (web::lang)
 //   out/docs/       versions.json, index.html (to latest/) and 404.html
 //                   (each version directory has its own too);
 //                   latest/ is the newest release (versions.nabion) again
@@ -52,6 +54,8 @@ use std::process;
 use std::process::{Command, Stdio};
 use web::build::{png_size, write};
 use web::kit;
+use web::lang;
+use web::lang::Lang;
 
 /// The name with the slogan, `Nabi: <tagline>`, or the name alone without
 /// one.
@@ -84,8 +88,14 @@ pub struct Site {
     pub newest_release: str = "";
     /// The spec's English edition (`spec/en`), relative to this file.
     pub spec: str = "../spec/en";
-    /// The Korean edition (`spec/ko`), rendered under `ko/`; `""` for none.
+    /// The Korean edition (`spec/ko`), rendered under `ko/`; `""`: the
+    /// directory `ko` beside `spec`. A page an edition lacks shows the
+    /// English text under a note.
     pub spec_ko: str = "";
+    /// The Chinese editions, under `zh-hans/` and `zh-hant/`; `""`: the
+    /// directories `zh-hans` and `zh-hant` beside `spec`.
+    pub spec_zh_hans: str = "";
+    pub spec_zh_hant: str = "";
     /// Where links that leave the spec directory point (`../LICENSE`).
     pub spec_repo: str;
     pub spec_branch: str = "main";
@@ -172,12 +182,20 @@ pub struct Frag {
     pub toc: str = "";
     /// hreflang `<link>`s for `<head>`, or `""`.
     pub head: str;
-    /// The page in the other language, from the version root, or `""`.
+    /// The page in the other language, from the version root, or `""`:
+    /// the English page of a page in another language, the Korean one of
+    /// an English page.
     pub alt: str = "";
     /// This page's heading ids paired with those of `alt` (search.js
     /// carries the reader's section over).
     pub sec: str = "";
-    /// A Korean page still in English: kept out of search engines.
+    /// The page in every other language, by its code (`zh-Hans`), and the
+    /// heading pairs with each (as `sec`). Empty in a bundle archived
+    /// before there were more than two languages: `alt` alone then.
+    pub alts: Dict<str, str> = Dict::new();
+    pub secs: Dict<str, str> = Dict::new();
+    /// A page in another language still in English: kept out of search
+    /// engines.
     pub noindex: bool = false;
     /// The breadcrumb between the section and this page (spec chapters),
     /// each link after a separator, or `""`.
@@ -193,6 +211,16 @@ pub struct Frag {
     pub pkg_src: str = "";
 }
 
+/// One language's search index (search::index) and body-text index
+/// (search::text_index); `dir` is the language's directory (`""`,
+/// `zh-hans/`).
+#[derive(Nabion)]
+pub struct LangIndex {
+    pub dir: str;
+    pub search: str;
+    pub text: str = "";
+}
+
 /// One released version's docs as fragments, plus its search index.
 #[derive(Nabion)]
 pub struct Bundle {
@@ -204,6 +232,8 @@ pub struct Bundle {
     /// The body-text indexes (search::text_index), English and Korean.
     pub text: str = "";
     pub text_ko: str = "";
+    /// The other languages' indexes (zh-hans/, zh-hant/).
+    pub more: List<LangIndex> = List::new();
     /// llms.txt and llms-full.txt, links against llms::BASE.
     pub llms: str = "";
     pub llms_full: str = "";
@@ -320,11 +350,34 @@ fn usage() {
     process::exit(2);
 }
 
-/// hreflang links between a page's English and Korean editions.
-pub fn hreflang(site: Site, en: str, ko: str) -> str {
-    let e = markdown::esc(layout::latest(site, en));
-    f"<link rel=\"alternate\" hreflang=\"en\" href=\"{e}\">\n<link rel=\"alternate\" hreflang=\"ko\" href=\"{markdown::esc(layout::latest(site, ko))}\">\n<link rel=\"alternate\" hreflang=\"x-default\" href=\"{e}\">\n"
+/// hreflang links between a page's editions, each `(language, page)`,
+/// English first; the English one is x-default too.
+pub fn hreflang(site: Site, eds: List<(Lang, str)>) -> str {
+    let b = StrBuf::new();
+    let en = "";
+    for (l, out) in eds {
+        let u = markdown::esc(layout::latest(site, out));
+        if l.is_en() { en = u; }
+        b.push_str(f"<link rel=\"alternate\" hreflang=\"{l.code()}\" href=\"{u}\">\n");
+    }
+    if !en.is_empty() { b.push_str(f"<link rel=\"alternate\" hreflang=\"x-default\" href=\"{en}\">\n"); }
+    b.to_str()
 }
+
+/// One language's pages of a docs version: the spec, the docs' own pages
+/// and the API, each list in the same order in every language; `real`
+/// holds the pages written in the language (out paths), the others show
+/// the English text under a note.
+pub struct Ed {
+    pub lang: Lang;
+    pub spec: List<Page>;
+    pub own: List<Page>;
+    pub api: List<Page>;
+    pub real: Set<str>;
+}
+
+/// Whether page `out` of `e` is in its language.
+pub fn is_real(e: Ed, out: str) -> bool { e.lang.is_en() || e.real.contains(out) }
 
 fn main() throws {
     let t0 = Instant::now();
@@ -387,19 +440,37 @@ fn main() throws {
     // current chrome is applied in `wrap`, so a released version's archived
     // fragments re-wrap with it too.
     let frags: Dict<str, Frag> = Dict::new();
-    let pages = try spec::pages(site, spec::root(site.spec), "", false);
-    let ko_pages: List<Page> = if site.spec_ko.is_empty() { List::new() } else { try spec::pages(site, spec::root(site.spec_ko), "ko/", true) };
-    spec::frags(site, pages, ko_pages, frags);
-    let (own, ko_own, translated) = try guide::pages(site);
-    guide::frags(site, own, ko_own, translated, frags);
-    let (mods, api, api_ko) = try apidoc::frags(site, pages, frags);
+    let pages = try spec::pages(site, spec::root(site.spec), "", Lang::En);
+    let own = try guide::pages(site);
+    // Every language has every page: its own, or the English one under
+    // a note.
+    let eds: List<Ed> = [Ed { lang: Lang::En, spec: pages, own: own, api: List::new(), real: Set::new() }].to_list();
+    for l in lang::ALL {
+        if l.is_en() { continue; }
+        let (sp, real) = try spec::edition(site, pages, l);
+        let (gp, greal) = try guide::edition(site, own, l);
+        for o in greal { real.insert(o); }
+        eds.push(Ed { lang: l, spec: sp, own: gp, api: List::new(), real: real });
+    }
+    spec::frags(site, eds, frags);
+    guide::frags(site, eds, frags);
+    let (mods, api) = try apidoc::frags(site, pages, frags);
+    for k in 0..eds.len() {
+        let e = eds[k];
+        e.api = if e.lang.is_en() { api } else { apidoc::edition(api, e.lang, frags) };
+        eds[k] = e;
+    }
     links::fix(frags, own);
 
     // A search index per language: every page, its `##` / `###` sections
     // and the API's items and members.
-    let idx = search::index([own, pages, api]);
-    let idx_ko = search::index([ko_own, ko_pages, api_ko]);
-    let text = (search::text_index([own, pages, api], 2), search::text_index([ko_own, ko_pages, api_ko], 2));
+    let indexes: List<LangIndex> = List::new();
+    for e in eds { indexes.push(LangIndex { dir: e.lang.dir(), search: search::index([e.own, e.spec, e.api]), text: search::text_index([e.own, e.spec, e.api], 2) }); }
+    let idx = indexes[0].search;
+    let idx_ko = indexes[1].search;
+    let text = (indexes[0].text, indexes[1].text);
+    let more: List<LangIndex> = List::new();
+    for k in 2..indexes.len() { more.push(indexes[k]); }
     let shown = if site.built_from.is_empty() { version } else { site.built_from };
     let llm = (llms::index(site, shown, own, pages, mods), try llms::full(site, shown, own));
 
@@ -437,17 +508,17 @@ fn main() throws {
         outs.sort();
         let fl: List<Frag> = List::new();
         for o in outs { fl.push(frags[o]); }
-        try write(archive_out, "bundle.nabion", try nabion::to_str(Bundle { version: version, pages: fl, search: idx, search_ko: idx_ko, text: text.0, text_ko: text.1, llms: llm.0, llms_full: llm.1 }));
+        try write(archive_out, "bundle.nabion", try nabion::to_str(Bundle { version: version, pages: fl, search: idx, search_ko: idx_ko, text: text.0, text_ko: text.1, more: more, llms: llm.0, llms_full: llm.1 }));
         println(f"archived docs {version}: {fl.len()} pages → {archive_out}/bundle.nabion ({t0.elapsed():?})");
         return;
     }
 
-    let (www, www_urls, www_cards) = try www::pages(ref site, own, ko_own, latest_outs);
+    let (www, www_urls, www_cards) = try www::pages(ref site, eds, latest_outs);
     let docs_root = out_root + "/docs";
     let docs_dir = docs_root + "/" + version;
     let www_dir = out_root + "/www";
     if fs::exists(www_dir) { try fs::remove_dir_all(www_dir); }
-    let statics = try files::write_version(site, docs_root, version, files, idx, idx_ko, text, llm);
+    let statics = try files::write_version(site, docs_root, version, files, indexes, llm);
     let fl: List<Frag> = List::new();
     for o in frags.keys() { fl.push(frags[o]); }
     try write(docs_root + "/" + version, "og.nabion", try nabion::to_str(layout::cards(fl)));
@@ -455,7 +526,7 @@ fn main() throws {
 
     // latest/ is the newest release's pages again, linking within latest/:
     // this build's, or the archived ones re-wrapped.
-    let latest = if version == newest { versions::Latest { pages: files, search: idx, search_ko: idx_ko, text: text, llms: llm } } else { versions::Latest { pages: Dict::new(), search: "", search_ko: "", text: ("", ""), llms: ("", "") } };
+    let latest = if version == newest { versions::Latest { pages: files, indexes: indexes, llms: llm } } else { versions::Latest { pages: Dict::new(), indexes: List::new(), llms: ("", "") } };
     let (latest2, arch_bad) = if archive.is_empty() { (latest, List::<str>::new()) } else { try versions::rewrap(ref site, vs, archive, docs_root, latest_outs, latest) };
     let has_latest = try versions::root(ref site, vs, docs_root, www_dir, latest_outs, latest_hidden, latest2);
 
@@ -476,7 +547,7 @@ fn main() throws {
     for b in try links::relative_assets(out_root) { bad.push(b); }
     for b in bad { eprintln(f"broken link: {b}"); }
     let latest_note = if has_latest { ", latest/ = " + newest } else { "" };
-    println(f"docs {version}: {pages.len()} + {ko_pages.len()} (ko) spec pages + {own.len()} guide pages + {api.len()} API pages → {docs_dir}/ ({files.len()} html){latest_note}; home → {www_dir}/; {bad.len()} broken links, {t0.elapsed():?}");
+    println(f"docs {version}: {pages.len()} spec pages + {own.len()} guide pages + {api.len()} API pages, in {eds.len()} languages → {docs_dir}/ ({files.len()} html){latest_note}; home → {www_dir}/; {bad.len()} broken links, {t0.elapsed():?}");
     if !has_latest && !newest.is_empty() {
         eprintln(f"note: {newest} is neither built now nor archived, so no latest/: build it with `--version {newest}`, or point NABI_DOCS_ARCHIVE at an archive");
     }
