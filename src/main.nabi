@@ -444,6 +444,12 @@ fn main() throws {
     let pkg_dir = try env::var("NABI_PKG_DOCS") catch _ { site.pkg_docs };
     let pkg_pages = if pkg_dir.is_empty() { 0usize } else { try pkgdocs::write(site, docs_root, pkg_dir, if has_latest { "latest" } else { version }) };
     if pkg_pages > 0 { println(f"package docs: {pkg_pages} pages → {docs_root}/packages/"); }
+    // The docs host's own security.txt (RFC 9116), as on every Nabi site.
+    try write(docs_root, ".well-known/security.txt", web::chrome::security_txt(site.docs_url));
+    // Browsers and crawlers ask the host root for its icon.
+    for f in kit::files() {
+        if f.name == "favicon.ico" || f.name == "favicon.svg" { try fs::write(docs_root + "/" + f.name, f.data); }
+    }
 
     let bad = links::check(files, statics);
     for b in links::check(www, www_statics) { bad.push("www/" + b); }

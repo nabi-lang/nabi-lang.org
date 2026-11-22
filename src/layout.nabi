@@ -656,38 +656,16 @@ const ICON_CLOSE: str = "<svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" f
 
 const TOGGLE: str = "<button class=\"nav-toggle\" type=\"button\" aria-label=\"Menu\" aria-expanded=\"false\" aria-controls=\"nav\"><span class=\"bars\"></span></button>";
 
-/// Where the footer's links go, from the page it sits on.
-struct Links {
-    home: str;
-    docs: str;
-    learn: str;
-    examples: str;
-    errors: str;
-    spec: str;
-    api: str;
-    tools: str;
-    publishing: str;
-    roadmap: str;
-    news: str;
-    faq: str;
-}
 
-/// The footer of the Nabi sites (chrome.nabi), with this site's columns.
-/// `on` is the site the page belongs to, `home` or `docs`.
-fn footer(site: Site, l: Links, note: str, logo: str, ko: bool, on: str) -> str {
-    let gh = "https://github.com/nabi-lang";
-    let a = |href: str, text: str| f"<a href=\"{esc(href)}\">{text}</a>";
+/// The footer every Nabi site shares (chrome::site_cols, legal links in
+/// its bar). `on` is the site the page belongs to, `home` or `docs`.
+fn footer(site: Site, l: chrome::Links, note: str, logo: str, ko: bool, on: str) -> str {
     chrome::footer(chrome::Footer {
-        home: l.home,
+        home: l.home + (if ko { "ko/" } else { "" }),
         logo: logo,
         tagline: tr(ko, site.tagline, TAGLINE_KO),
-        cols: [
-            (tr(ko, "Docs", "문서"), a(l.learn, tr(ko, "Guide", "가이드")) + a(l.examples, tr(ko, "Examples", "예제")) + (if l.errors.is_empty() { "" } else { a(l.errors, tr(ko, "Error codes", "에러 코드")) })),
-            (tr(ko, "Reference", "참조"), a(l.spec, tr(ko, "Language spec", "언어 사양")) + a(l.api, tr(ko, "Std library", "표준 라이브러리")) + a(l.tools, tr(ko, "Tools", "도구"))),
-            (tr(ko, "Ecosystem", "생태계"), a(site.playground, tr(ko, "Playground", "플레이그라운드")) + a(site.packages, tr(ko, "Packages", "패키지")) + a(l.publishing, tr(ko, "Publishing", "패키지 공개")) + a(gh + "/nabi.vscode", "VS Code") + a(gh + "/nabi.vim", "Vim") + a(gh + "/nabi.zed", "Zed")),
-            (tr(ko, "Project", "프로젝트"), a(l.news, tr(ko, "News", "소식")) + a(l.roadmap, tr(ko, "Roadmap", "로드맵")) + a(l.faq, "FAQ") + a(gh + "/nabi", "GitHub") + a(chrome::SECURITY, tr(ko, "Security", "보안")) + a(gh + "/nabi/blob/main/CODE_OF_CONDUCT.md", tr(ko, "Code of conduct", "행동 강령")) + a("mailto:contact@nabi-lang.org", tr(ko, "Contact", "연락처"))),
-        ],
-        sites: chrome::Sites { home: l.home, docs: l.docs, registry: site.packages, playground: site.playground, current: on },
+        cols: chrome::site_cols(l, ko),
+        sites: chrome::Sites { home: l.home, docs: l.docs, registry: l.registry, playground: l.playground, current: on },
         after: note,
         ko: ko,
         release: site.release,
@@ -876,7 +854,9 @@ fn frame(site: Site, root: str, f: Frag, banner: str) -> str {
     // search engines.
     let robots = if (site.version == "dev" && !pkg) || f.noindex { "<meta name=\"robots\" content=\"noindex\">\n" } else { "" };
     let ver = if site.version == "dev" { "dev" } else { "v" + site.version };
-    let links = Links { home: site.base_url, docs: root + in_lang("index.html", ko), learn: root + in_lang("learn/index.html", ko), examples: root + in_lang("examples/index.html", ko), errors: if site.no_errors { "" } else { root + in_lang("errors/index.html", ko) }, spec: root + in_lang("spec/refs-lang/index.html", ko), api: root + in_lang("std/index.html", ko), tools: root + in_lang("spec/refs-lang/009-tools/index.html", ko), publishing: root + in_lang("learn/18-features-and-publishing.html", ko) + (if ko { "" } else { "#publishing-a-package" }), roadmap: site.base_url + "/roadmap", news: site.base_url + "/news", faq: site.base_url + "/faq" };
+    // Absolute: the footer is the same on every site, and its links go
+    // to this version's docs (a package's docs: to the newest's).
+    let links = chrome::Links { home: site.base_url + "/", docs: f"{site.docs_url}/{if pkg { "latest" } else { site.version }}/", docs_host: site.docs_url + "/", registry: site.packages + "/", playground: site.playground + "/" };
     let play = if !site.newest.is_empty() && site.version == site.newest { esc(site.playground) } else { "" };
     let (skip, menu, sections, find, results, version) = if ko {
         ("본문으로 건너뛰기", "메뉴", "섹션", "문서 검색", "검색 결과", "문서 버전")
@@ -946,7 +926,7 @@ pub fn www_page(site: Site, out: str, title: str, body: str) -> str {
     let (alt_head, switch) = if out == "404.html" { ("", "") } else {
         let en_url = esc(page_url(at));
         let ko_url = esc(page_url("ko/" + at));
-        (f"<link rel=\"alternate\" hreflang=\"en\" href=\"{en_url}\">\n<link rel=\"alternate\" hreflang=\"ko\" href=\"{ko_url}\">\n<link rel=\"alternate\" hreflang=\"x-default\" href=\"{en_url}\">\n", lang_switch(root, at, ko, if ko { at } else { "ko/" + at }, ""))
+        (f"<link rel=\"alternate\" hreflang=\"en\" href=\"{en_url}\">\n<link rel=\"alternate\" hreflang=\"ko\" href=\"{ko_url}\">\n<link rel=\"alternate\" hreflang=\"x-default\" href=\"{en_url}\">\n<link rel=\"alternate\" type=\"application/atom+xml\" title=\"{tr(ko, "Nabi news", "Nabi 소식")}\" href=\"{esc(site.base_url)}/{if ko { "ko/" } else { "" }}news/feed.xml\">\n", lang_switch(root, at, ko, if ko { at } else { "ko/" + at }, ""))
     };
     let kind = if at == "index.html" { "landing" } else { "plain" };
     // A page www_desc has no words for (a news post) is described by
@@ -955,7 +935,7 @@ pub fn www_page(site: Site, out: str, title: str, body: str) -> str {
     let desc = esc(if wd == site.description && at != "index.html" && at != "404.html" { page_lead(body) ?? wd } else { wd });
     let main = if at == "index.html" { body } else { f"<div class=\"frame page\"><article class=\"prose\">\n{body}</article></div>\n" };
     let install = if at == "download.html" { " aria-current=\"page\"" } else { "" };
-    let links = Links { home: home + "index.html", docs: d("index.html"), learn: d("learn/index.html"), examples: d("examples/index.html"), errors: if site.no_errors { "" } else { d("errors/index.html") }, spec: d("spec/refs-lang/index.html"), api: d("std/index.html"), tools: d("spec/refs-lang/009-tools/index.html"), publishing: d("learn/18-features-and-publishing.html#publishing-a-package"), roadmap: home + "roadmap.html", news: home + "news/index.html", faq: home + "faq.html" };
+    let links = chrome::Links { home: site.base_url + "/", docs: site.docs_url + "/latest/", docs_host: site.docs_url + "/", registry: site.packages + "/", playground: site.playground + "/" };
     // The landing page has the site's card; the others their own.
     let img = if at == "download.html" || at == "roadmap.html" || at == "faq.html" || at == "news/index.html" {
         let c = www_card(site, out, title);

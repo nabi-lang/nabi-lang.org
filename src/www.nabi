@@ -163,6 +163,32 @@ pub fn post_list(list: List<Post>, ko: bool) -> str {
     b.to_str()
 }
 
+/// The Atom feed of the news posts of `lang` (`""` or `ko/`) that are
+/// out, newest first (RFC 4287).
+pub fn feed(site: Site, posts: List<Post>, lang: str) -> str {
+    let ko = !lang.is_empty();
+    let base = site.base_url + "/" + lang;
+    let x = |s: str| s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;");
+    let out: List<Post> = List::new();
+    for p in posts {
+        if p.date.starts_with("2") { out.push(p); }
+    }
+    out.sort_by(|a: Post, b: Post| b.date.cmp(a.date));
+    let updated = if out.is_empty() { "2026-11-22" } else { out[0].date };
+    let b = StrBuf::new();
+    b.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<feed xmlns=\"http://www.w3.org/2005/Atom\"");
+    b.push_str(f" xml:lang=\"{if ko { "ko" } else { "en" }}\">\n");
+    b.push_str(f"<title>{if ko { "Nabi 소식" } else { "Nabi news" }}</title>\n<id>{x(base)}news</id>\n");
+    b.push_str(f"<link rel=\"self\" href=\"{x(base)}news/feed.xml\"/>\n<link rel=\"alternate\" type=\"text/html\" href=\"{x(base)}news\"/>\n");
+    b.push_str(f"<updated>{updated}T00:00:00Z</updated>\n<author><name>DaminStudio</name></author>\n");
+    for p in out {
+        let url = f"{base}news/{p.name}";
+        b.push_str(f"<entry>\n<title>{x(p.title)}</title>\n<id>{x(url)}</id>\n<link rel=\"alternate\" type=\"text/html\" href=\"{x(url)}\"/>\n<updated>{p.date}T00:00:00Z</updated>\n<content type=\"html\">{x(p.html)}</content>\n</entry>\n");
+    }
+    b.push_str("</feed>\n");
+    b.to_str()
+}
+
 /// The home site's pages by output path (index, download, roadmap, faq
 /// and news/ from nabi-lang/www, their Korean editions from its ko/
 /// under `ko/`, and 404), their addresses for the sitemap, and the title
@@ -187,7 +213,7 @@ pub fn pages(ref site: Site, own: List<Page>, ko_own: List<Page>, latest: Set<st
             }
         }
         let news = try posts(site, f"{site.www}/{dir}news", dir);
-        for name in ["index", "download", "roadmap", "faq", "news/index"] {
+        for name in ["index", "download", "roadmap", "faq", "news/index", "privacy", "terms"] {
             let path = f"{site.www}/{dir}{name}.md";
             if !fs::exists(path) { continue; }
             let (title, html) = try render(site, path, dir);
@@ -197,6 +223,7 @@ pub fn pages(ref site: Site, own: List<Page>, ko_own: List<Page>, latest: Set<st
             www.insert(out, layout::www_page(site, out, title, body));
             urls.push(site.base_url + "/" + dir + if name == "index" { "" } else if name == "news/index" { "news" } else { name });
         }
+        www.insert(dir + "news/feed.xml", feed(site, news, dir));
         for p in news {
             let out = f"{dir}news/{p.name}.html";
             www.insert(out, layout::www_page(site, out, p.title, after_h1(p.html, dated(p, ko))));
@@ -226,13 +253,21 @@ pub fn write_to(site: Site, dir: str, pages: Dict<str, str>, urls: List<str>, ca
         statics.insert(f);
     }
     try write(dir, "robots.txt", f"User-agent: *\nAllow: /\nSitemap: {site.base_url}/sitemap.xml\n");
-    try write(dir, ".well-known/security.txt", f"Contact: mailto:security@nabi-lang.org\nExpires: 2027-10-24T00:00:00.000Z\nPreferred-Languages: en, ko\nCanonical: {site.base_url}/.well-known/security.txt\nPolicy: {chrome::SECURITY}\n");
+    try write(dir, ".well-known/security.txt", chrome::security_txt(site.base_url));
     try write(dir, "sitemap.xml", sitemap(urls));
     statics
 }
 
 /// The checkout the installers are copied from.
 pub fn installers_dir(site: Site) -> str { if site.installers.is_empty() { site.library + "/.." } else { site.installers } }
+
+#[test]
+fn news_feed() {
+    let site = Site { title: "", tagline: "", spec_repo: "", packages: "", base_url: "https://n.org" };
+    let f = feed(site, [Post { name: "a", date: "2026-11-21", title: "A & B", html: "<p>x</p>" }, Post { name: "b", date: "", title: "draft", html: "" }, Post { name: "c", date: "2026-11-22", title: "C", html: "" }], "ko/");
+    assert(f.contains("<id>https://n.org/ko/news/c</id>") && f.contains("<title>A &amp; B</title>") && f.contains("&lt;p&gt;x&lt;/p&gt;") && !f.contains("draft"), f);
+    assert((f.find("news/c") ?? 0) < (f.find("news/a") ?? 0) && f.contains("<updated>2026-11-22T00:00:00Z</updated>") && f.contains("xml:lang=\"ko\""), "newest first");
+}
 
 #[test]
 fn post_dates() {

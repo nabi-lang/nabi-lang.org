@@ -603,7 +603,7 @@ pub fn crumb(m: Module, mods: List<Module>) -> str {
 }
 
 /// The breadcrumb of item page `s` of module `m`.
-fn sub_crumb(m: Module, mods: List<Module>, s: Sub) -> str {
+pub fn sub_crumb(m: Module, mods: List<Module>, s: Sub) -> str {
     let root = segs(m.path)[0];
     let t = nav::trail(mods, m, root, |q: Module| rel(s.out, q.out));
     t.push((s.title[m.path.len() + 2:], s.out[(s.out.rfind("/") ?? 0) + 1:]));

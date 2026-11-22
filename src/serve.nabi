@@ -400,8 +400,9 @@ const FOREVER: str = "public, max-age=31536000, immutable";
 
 /// The browser's copy of anything that can change with a deploy: checked
 /// on every load (a 304 by ETag, handle), so a deploy shows at once; the
-/// CDN in front keeps it a day, until the deploy purges it.
-const FRESH: str = "public, max-age=0, must-revalidate, s-maxage=86400";
+/// CDN in front keeps it a day, until the deploy purges it, and a day
+/// more while the origin fails (web::http::FRESH).
+const FRESH: str = "public, max-age=0, s-maxage=86400, stale-if-error=86400";
 
 /// A version's pages that never change but with the site's chrome.
 const PINNED: str = "public, max-age=86400, stale-while-revalidate=604800";
@@ -424,6 +425,8 @@ pub fn cache_for(f: str, path: str, query: str, docs: bool) -> str {
         }
         return if docs && first.split(".").count() == 3 { PINNED } else { FRESH };
     }
+    // The kit's webfonts change only under a new name (web::http::FONTS).
+    if f.contains("/fonts/") { return FOREVER; }
     let v = query_v(query);
     if !v.is_empty() && v == (try pkg::og_version(f) catch _ { "" }) { return FOREVER; }
     FRESH
@@ -442,6 +445,12 @@ pub fn query_v(query: str) -> str {
 pub fn redirect(path: str, docs: bool) -> str | none {
     let c = url::canonical(path) ?? path;
     if docs && c == "/" { c = "/latest"; }
+    // The addresses people guess on the home site.
+    if !docs {
+        for (from, to) in [("/install", "/download"), ("/ko/install", "/ko/download"), ("/learn", "https://docs.nabi-lang.org/latest/learn"), ("/ko/learn", "https://docs.nabi-lang.org/latest/ko/learn"), ("/docs", "https://docs.nabi-lang.org/latest")] {
+            if c == from { return to; }
+        }
+    }
     // A package's docs without a version: its newest.
     if docs {
         if let name: str = (c.strip_prefix("/ko") ?? c).strip_prefix("/packages/") {
@@ -682,6 +691,7 @@ fn redirects() {
     assert(to("/latest/learn/05-sum-types.html", true) == "/latest/learn/05-sum-types", ".html");
     assert(to("/0.1/learn/", true) == "/0.1/learn" && to("/0.1", true) == "-", "minor alias");
     assert(to("/download/", false) == "/download" && to("/nabi.css", false) == "-", "www");
+    assert(to("/install", false) == "/download" && to("/learn", false) == "https://docs.nabi-lang.org/latest/learn" && to("/install", true) == "-", "guessed addresses");
     assert(to("/packages/json", true) == "/packages/json/latest" && to("/packages/json/", true) == "/packages/json/latest", "a package's docs");
     assert(to("/packages", true) == "-" && to("/packages/json/0.2.0", true) == "-" && to("/packages/json", false) == "-", "package docs pages");
     assert(to("/ko/packages/json", true) == "/ko/packages/json/latest" && to("/ko/packages", true) == "-", "in the Korean chrome");
@@ -692,7 +702,7 @@ fn redirects() {
     assert(cache_for("out/docs/dev/learn.html", "/dev/learn", "", true) == FRESH, "dev");
     assert(cache_for("out/docs/0.1.2/learn.html", "/0.1.2/learn", "", true) == PINNED, "release");
     assert(cache_for("out/www/download.html", "/download", "", false) == FRESH, "home");
-    assert(cache_for("out/www/fonts/Geist-Variable.woff2", "/fonts/Geist-Variable.woff2", "", false) == FRESH, "fonts");
+    assert(cache_for("out/www/fonts/Geist-Variable.woff2", "/fonts/Geist-Variable.woff2", "", false) == FOREVER, "fonts");
     assert(cache_for("out/docs/latest/search-index.json", "/latest/search-index.json", "", true) == FRESH, "index");
     assert(cache_for("out/docs/packages/json/0.2.0/read.html", "/packages/json/0.2.0/read", "", true) == PINNED && cache_for("out/docs/packages/json/latest/read.html", "/packages/json/latest/read", "", true) == FRESH, "package docs");
     assert(cache_for("out/docs/ko/packages/json/0.2.0.html", "/ko/packages/json/0.2.0", "", true) == PINNED && cache_for("out/docs/packages/index.html", "/packages", "", true) == FRESH, "korean chrome, the list");

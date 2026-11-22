@@ -193,6 +193,13 @@ fn version_pages(site: Site, p: DocsPackage, v: DocsVersion, d: PackageDocs, at:
         let rest = m.out[base.len():];
         let f = Frag { out: m.out, title: m.path, side: apidoc::package_sidebar(m, mods, m.out, v.version, deps), toc: apidoc::toc(heads), body: html, pager: "", head: alternates(site, m.out), trail: apidoc::crumb(m, mods), pkg_ver: v.version, pkg_vers: menu(pdir, rest, m.out, vs, v.version, latest, pages) };
         files.insert(m.out, layout::package_page(site, f, chrome));
+        // A module too big for one page gives its big items their own
+        // (apidoc::subpages), as the std pages do.
+        for s in apidoc::subpages(m, since, src, types) {
+            let srest = s.out[base.len():];
+            let sf = Frag { out: s.out, title: s.title, side: apidoc::package_sidebar(m, mods, s.out, v.version, deps), toc: apidoc::toc(s.heads), body: s.html, pager: "", head: alternates(site, s.out), trail: apidoc::sub_crumb(m, mods, s), pkg_ver: v.version, pkg_vers: menu(pdir, srest, s.out, vs, v.version, latest, pages) };
+            files.insert(s.out, layout::package_page(site, sf, chrome));
+        }
     }
 }
 
