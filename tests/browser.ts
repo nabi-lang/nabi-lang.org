@@ -10,10 +10,14 @@
 // leaves the machine. It ends with the bytes, gzipped, the first search
 // of the docs reads.
 //
+// The Chinese searches run where the docs have the page they look for in
+// Chinese (learn/rosetta/algorithms), and say so where they skip.
+//
 // usage: node tests/browser.ts [--shots <dir>] [--version dev] [--out public] [page..]
 //   page: `www:<path>`, `docs:<path>` (in the version, e.g.
-//   `docs:learn/rosetta/`) or `pkg:<path>` (under /packages/); without
-//   any, a representative set.
+//   `docs:learn/rosetta/`), `pkg:<path>` (under /packages/) or
+//   `host:<path>` (from the docs host's root, `host:zh-hans/packages/`);
+//   without any, a representative set.
 // Needs Chrome (CHROME_PATH, or the usual install paths).
 import puppeteer, { type Browser, type HTTPRequest, type Page } from "puppeteer-core";
 import { gzipSync } from "node:zlib";
@@ -40,6 +44,9 @@ const DEFAULT = [
   "docs:", "docs:learn/", "docs:learn/05-sum-types", "docs:learn/22-science", "docs:ko/learn/22-science",
   "docs:learn/rosetta/", "docs:learn/rosetta/strings", "docs:ko/learn/rosetta/numbers",
   "docs:std/core/collections/list", "docs:errors/", "pkg:", "pkg:json/latest", "pkg:table/latest/column",
+  "www:zh-hans/", "www:zh-hans/download", "www:zh-hans/news/nabi-0.1.0", "www:zh-hant/", "www:zh-hant/faq", "www:zh-hant/releases/",
+  "docs:zh-hans/", "docs:zh-hans/learn/05-sum-types", "docs:zh-hans/spec/refs-lang/", "docs:zh-hant/learn/rosetta/algorithms", "docs:zh-hant/std/core/collections/list", "docs:zh-hant/errors/",
+  "host:zh-hans/packages/", "host:zh-hant/packages/json/latest",
 ];
 const pages = args.length ? args : DEFAULT;
 
@@ -258,7 +265,7 @@ async function interactions(browser: Browser, www: string, docs: string): Promis
     await page.close();
   }
   // The header menus: open, Escape, closed with the focus on the summary.
-  for (const [url, sel] of [[`${v}/learn/`, "details.vers"], [`${v}/learn/`, "details.lang-menu"], [`${www}/download`, "details.lang-menu"]] as const) {
+  for (const [url, sel] of [[`${v}/learn/`, "details.vers"], [`${v}/learn/`, "details.lang-menu"], [`${www}/download`, "details.lang-menu"], [`${v}/zh-hant/learn/`, "details.lang-menu"], [`${www}/zh-hans/download`, "details.lang-menu"]] as const) {
     const errors: string[] = [];
     const page = await open(browser, url, false, false, errors);
     await page.click(`${sel} > summary`);
@@ -272,8 +279,31 @@ async function interactions(browser: Browser, www: string, docs: string): Promis
     failed += report(`menu ${sel} closes on Escape ${url.replace(/^http:\/\/[^/]+/, "")}`, errors);
     await page.close();
   }
+  // The language menu: every language, each the same page in it, the
+  // section carried over.
+  for (const [url, path] of [[`${v}/zh-hans/learn/05-sum-types`, `/${version}/zh-hans/learn/05-sum-types`], [`${www}/zh-hant/faq`, "/zh-hant/faq"], [`${docs}/zh-hans/packages/json/latest`, "/zh-hans/packages/json/latest"]] as const) {
+    const errors: string[] = [];
+    const page = await open(browser, url, false, false, errors);
+    const items = await page.$$eval(".lang-menu li > *", (es) => es.map((e) => [e.getAttribute("lang") ?? "", e.getAttribute("href") ?? ""]));
+    const codes = items.map(([c]) => c).join(" ");
+    if (codes !== "en ko zh-Hans zh-Hant") errors.push(`languages: ${codes}`);
+    // `/<version>/<lang>/..` on the docs, `/<lang>/..` elsewhere
+    const bare = path.replace(/\/(ko|zh-hans|zh-hant)\//, "/");
+    const head = bare.startsWith(`/${version}/`) ? `/${version}/` : "/";
+    for (const [c, h] of items) {
+      if (!h) continue;
+      const want = c === "en" ? bare : head + c!.toLowerCase() + "/" + bare.slice(head.length);
+      if (h !== want) errors.push(`${c}: ${h}, not ${want}`);
+    }
+    const lang = await page.evaluate(() => document.documentElement.lang);
+    if (!/^zh-Han[st]$/.test(lang)) errors.push(`html lang ${lang}`);
+    const font = await page.evaluate(() => getComputedStyle(document.querySelector("main p, main li") ?? document.body).fontFamily);
+    if (!font.includes(lang === "zh-Hans" ? "PingFang SC" : "PingFang TC")) errors.push(`no CJK face for ${lang}: ${font}`);
+    failed += report(`language menu ${url.replace(/^http:\/\/[^/]+/, "")}`, errors);
+    await page.close();
+  }
   // The search palette: Ctrl+K, groups for a name, Escape back.
-  for (const [url, q, want] of [[`${www}/`, "list", ["Std"]], [`${www}/ko/`, "json", ["패키지"]], [`${v}/learn/`, "json", ["Packages"]], [`${v}/learn/`, "sum types", ["Docs"]], [`${v}/learn/`, "sudoku", ["Examples"]]] as const) {
+  for (const [url, q, want] of [[`${www}/`, "list", ["Std"]], [`${www}/ko/`, "json", ["패키지"]], [`${www}/zh-hans/`, "json", ["包"]], [`${v}/zh-hant/learn/`, "list", ["標準函式庫"]], [`${v}/learn/`, "json", ["Packages"]], [`${v}/learn/`, "sum types", ["Docs"]], [`${v}/learn/`, "sudoku", ["Examples"]]] as const) {
     const errors: string[] = [];
     const page = await open(browser, url, false, false, errors);
     await page.keyboard.down("Control");
@@ -311,7 +341,7 @@ async function interactions(browser: Browser, www: string, docs: string): Promis
     await page.close();
   }
   // What the first search reads, gzipped: a fresh page, one query.
-  for (const [lang, q] of [["", "towers hanoi"], ["ko/", "하노이"]] as const) {
+  for (const [lang, q] of [["", "towers hanoi"], ["ko/", "하노이"], ["zh-hans/", "汉诺塔"]] as const) {
     const page = await open(browser, `${v}/${lang}learn/`, false, false, []);
     const got: string[] = [];
     page.on("requestfinished", (r) => { if (/search-|search-api|api\/v1\/docs/.test(r.url())) got.push(r.url()); });
@@ -342,7 +372,7 @@ async function main(): Promise<void> {
   let failed = 0;
   try {
     for (const p of pages) {
-      const [site, path] = p.startsWith("www:") ? [at(www), p.slice(4)] : p.startsWith("pkg:") ? [at(docs) + "/packages", p.slice(4)] : [at(docs) + "/" + version, p.replace(/^docs:/, "")];
+      const [site, path] = p.startsWith("www:") ? [at(www), p.slice(4)] : p.startsWith("pkg:") ? [at(docs) + "/packages", p.slice(4)] : p.startsWith("host:") ? [at(docs), p.slice(5)] : [at(docs) + "/" + version, p.replace(/^docs:/, "")];
       const url = `${site}/${path}`;
       for (const dark of [false, true]) {
         for (const phone of [false, true]) {
@@ -357,8 +387,15 @@ async function main(): Promise<void> {
         }
       }
     }
-    // Search: a phrase only body text has.
-    for (const [lang, q, want] of [["", "towers hanoi", "rosetta/algorithms"], ["", "quaternions symplectic", "learn/22-science"], ["ko/", "하노이", "rosetta/algorithms"]] as const) {
+    // Search: a phrase only body text has. Chinese: two characters, a
+    // longer run (each of its pairs), one character.
+    const zh: [string, string, string][] = [];
+    for (const [lang, qs] of [["zh-hans/", ["汉诺", "汉诺塔", "塔"]], ["zh-hant/", ["河內", "河內塔", "塔"]]] as const) {
+      const f = file(join(out, "docs", version), `${lang}learn/rosetta/algorithms`);
+      if (f && !readFileSync(f, "utf8").includes("class=\"tr-note\"")) for (const q of qs) zh.push([lang, q, "rosetta/algorithms"]);
+      else console.log(`skip search ${lang}: learn/rosetta/algorithms is not in ${lang} yet`);
+    }
+    for (const [lang, q, want] of [["", "towers hanoi", "rosetta/algorithms"], ["", "quaternions symplectic", "learn/22-science"], ["ko/", "하노이", "rosetta/algorithms"], ...zh] as const) {
       for (const dark of [false, true]) {
         for (const phone of [false, true]) {
           const errors: string[] = [];
