@@ -3,8 +3,8 @@
 // release each version's docs were built from, for the version menu.
 // Local builds only: the server lists the vX.Y.Z branches of docs and
 // spec. Since 0.1.0: `released: ["0.1"]` and
-// `patches: { "0.1": "0.1.2" }`; each patch release moves its entry.
+// `patches: { "0.1": "0.1.3" }`; each patch release moves its entry.
 Versions {
     released: ["0.1"],
-    patches: { "0.1": "0.1.2" },
+    patches: { "0.1": "0.1.3" },
 }
