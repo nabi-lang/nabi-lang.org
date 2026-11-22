@@ -56,7 +56,9 @@ pub fn index(groups: [List<Page>; 3]) -> str {
     let n = 0usize;
     for group in groups {
         for p in group {
-            if p.out == "index.html" || p.out == "ko/index.html" { continue; }
+            // A docs home is the version's start, not a hit; a package's
+            // root module (src "pkg") is.
+            if (p.out == "index.html" || p.out == "ko/index.html") && p.src != "pkg" { continue; }
             if n > 0 { pl.push_str(",\n"); }
             let lead = clip_text(layout::lead_text(p.html), 110);
             pl.push_str(f"[{json_str(p.title)},{json_str(url::canon(p.out))},{json_str(lead)}]");

@@ -48,6 +48,11 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
   type UA = Navigator & { userAgentData?: { platform?: string; getHighEntropyValues?: (hints: string[]) => Promise<{ architecture?: string }> } };
 
   const root = document.body.dataset.root || "/";
+  // A package's docs search only that package (data-search, its
+  // version's directory, English, no text index); what they lack is
+  // offered on the registry (data-all).
+  const scoped = document.body.dataset.search || "";
+  const sroot = scoped || root;
   const q = document.getElementById("q") as HTMLInputElement | null;
   const box = document.getElementById("results");
   let index: Entry[] | null = null;
@@ -58,7 +63,7 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
   // at once (the 404 hint below).
   const load = (): Promise<Entry[]> =>
     index ? Promise.resolve(index)
-      : fetch(root + (ko ? "ko/" : "") + "search-index.json").then((r) => {
+      : fetch(sroot + (ko && !scoped ? "ko/" : "") + "search-index.json").then((r) => {
         if (!r.ok) throw new Error(`search-index.json: ${r.status}`);
         return r.json() as Promise<SearchIndex>;
       }).then((d) => {
@@ -76,7 +81,7 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
   let words: string[] | null = null;
   let posts: string[] = [];
   const loadText = (): Promise<void> =>
-    words ? Promise.resolve()
+    words || scoped ? Promise.resolve()
       : fetch(root + (ko ? "ko/" : "") + "search-text.json").then((r) => {
         if (!r.ok) throw new Error(`search-text.json: ${r.status}`);
         return r.json() as Promise<TextIndex>;
@@ -649,7 +654,7 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
 
   // The list as last searched; drawn again as the selection moves.
   let list: Omit<ResultsProps, "sel"> | null = null;
-  const text = { none: T.none, down: T.down, inLatest: T.inLatest, legend: T.legend };
+  const text = { none: T.none, down: T.down, inLatest: scoped ? document.body.dataset.allLabel || T.inLatest : T.inLatest, legend: T.legend };
   let gen = 0;
   // Searches started; one that waited for the text index and is no
   // longer the newest draws nothing.
@@ -758,10 +763,12 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
     // An open list eases to its new height; a closed one fades in (.appear).
     const shown: Shown[] = hits.slice(0, 40).map(([, , , , e]) => ({ t: e.t, u: e.u, p: e.p, x: e.x, tag: e.k ? KIND[e.k] || e.k : where(e.u) }));
     // Another version may have it: an older one lacks newer pages.
-    const elsewhere = !hits.length && /^\/\d+\.\d+(\.\d+)?\/$|^\/dev\/$/.test(root)
-      ? "/latest" + (ko ? "/ko" : "") + "?q=" + encodeURIComponent(q!.value.trim()) : "";
+    const elsewhere = !hits.length && scoped
+      ? (document.body.dataset.all || "") + encodeURIComponent(q!.value.trim())
+      : !hits.length && /^\/\d+\.\d+(\.\d+)?\/$|^\/dev\/$/.test(root)
+        ? "/latest" + (ko ? "/ko" : "") + "?q=" + encodeURIComponent(q!.value.trim()) : "";
     const fill = (): void => {
-      list = { hits: shown, terms: alts.flat(), root, elsewhere, gen: ++gen, text };
+      list = { hits: shown, terms: alts.flat(), root: sroot, elsewhere, gen: ++gen, text };
       sel = -1;
       draw();
     };

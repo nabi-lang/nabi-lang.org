@@ -188,6 +188,8 @@ pub struct Frag {
     /// version menu's items; `""` on the toolchain's pages.
     pub pkg_ver: str = "";
     pub pkg_vers: str = "";
+    /// A package's source tree at the version, for its header.
+    pub pkg_src: str = "";
 }
 
 /// One released version's docs as fragments, plus its search index.

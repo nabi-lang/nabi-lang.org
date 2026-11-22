@@ -14,13 +14,15 @@ use pkg::apidoc;
 use pkg::layout;
 use pkg::layout::rel;
 use pkg::links;
-use pkg::{Frag, Site};
+use pkg::search;
+use pkg::{Frag, Page, Site};
 use markdown::esc;
 use std::fs;
 use std::nabion;
 use std::process::{Command, Stdio};
 use web::apidoc::Module;
 use web::apidoc::nav;
+use web::build::json_str;
 
 /// One version in the registry's docs index.
 #[derive(Nabion)]
@@ -176,6 +178,9 @@ fn version_pages(site: Site, p: DocsPackage, v: DocsVersion, d: PackageDocs, at:
     }
     let types = apidoc::type_index(mods);
     let src = source_at(v.repository, v.rev);
+    let tree_url = src.replace("/blob/", "/tree/");
+    // The header's search looks in this version's pages only.
+    let found: List<Page> = List::new();
     let since: Dict<str, str> = Dict::new();
     let spec: Dict<str, str> = Dict::new();
     for m in mods {
@@ -186,21 +191,21 @@ fn version_pages(site: Site, p: DocsPackage, v: DocsVersion, d: PackageDocs, at:
         }
         let notes: Dict<str, str> = Dict::new();
         let (html, heads) = apidoc::body(m, mods, since, notes, src, spec, types);
-        // Back to the package's page on the registry, and its source.
-        let tree = if src.is_empty() { "" } else { f" · <a href=\"{esc(src.replace("/blob/", "/tree/"))}\">Source <span aria-hidden=\"true\">↗</span></a>" };
-        let links = f"<p class=\"pkg-links\"><a href=\"{esc(site.packages)}/packages/{p.name}/{v.version}\">{esc(p.name)} {esc(v.version)} on the registry <span aria-hidden=\"true\">↗</span></a>{tree}</p>";
-        let html = if let k: usize = html.find("</h1>") { html[:k + 5] + links + html[k + 5:] } else { links + html };
+        found.push(Page { src: "pkg", out: m.out[base.len():], dir: "", title: m.path, html: html, heads: heads, notes: notes });
+        // The registry and the source are in the header (layout::pkg_bar).
         let rest = m.out[base.len():];
-        let f = Frag { out: m.out, title: m.path, side: apidoc::package_sidebar(m, mods, m.out, v.version, deps), toc: apidoc::toc(heads), body: html, pager: "", head: alternates(site, m.out), trail: apidoc::crumb(m, mods), pkg_ver: v.version, pkg_vers: menu(pdir, rest, m.out, vs, v.version, latest, pages) };
+        let f = Frag { out: m.out, title: m.path, side: apidoc::package_sidebar(m, mods, m.out, v.version, deps), toc: apidoc::toc(heads), body: html, pager: "", head: alternates(site, m.out), trail: apidoc::crumb(m, mods), pkg_ver: v.version, pkg_vers: menu(pdir, rest, m.out, vs, v.version, latest, pages), pkg_src: tree_url };
         files.insert(m.out, layout::package_page(site, f, chrome));
         // A module too big for one page gives its big items their own
         // (apidoc::subpages), as the std pages do.
         for s in apidoc::subpages(m, since, src, types) {
             let srest = s.out[base.len():];
-            let sf = Frag { out: s.out, title: s.title, side: apidoc::package_sidebar(m, mods, s.out, v.version, deps), toc: apidoc::toc(s.heads), body: s.html, pager: "", head: alternates(site, s.out), trail: apidoc::sub_crumb(m, mods, s), pkg_ver: v.version, pkg_vers: menu(pdir, srest, s.out, vs, v.version, latest, pages) };
+            let sf = Frag { out: s.out, title: s.title, side: apidoc::package_sidebar(m, mods, s.out, v.version, deps), toc: apidoc::toc(s.heads), body: s.html, pager: "", head: alternates(site, s.out), trail: apidoc::sub_crumb(m, mods, s), pkg_ver: v.version, pkg_vers: menu(pdir, srest, s.out, vs, v.version, latest, pages), pkg_src: tree_url };
             files.insert(s.out, layout::package_page(site, sf, chrome));
+            found.push(Page { src: "pkg", out: s.out[base.len():], dir: "", title: s.title, html: s.html, heads: s.heads, notes: s.notes });
         }
     }
+    files.insert(base + "search-index.json", search::index([found, List::new(), List::new()]));
 }
 
 /// The module pages of each version: `rest` paths (`read.html`), for the
@@ -282,7 +287,17 @@ pub fn write(site: Site, docs_root: str, dir: str, chrome: str) throws -> usize 
     }
     if listed.is_empty() { return 0usize; }
     listed.sort_by(|a: (DocsPackage, str), b: (DocsPackage, str)| a.0.name.cmp(b.0.name));
-    for lp in ["", "ko/"] { files.insert(lp + "packages/index.html", index_page(site, listed, chrome, lp)); }
+    // The index's search: each package, to its newest docs.
+    let ps = StrBuf::new();
+    for (p, _) in listed {
+        if !ps.is_empty() { ps.push_str(",\n"); }
+        ps.push_str(f"[{json_str(p.name)},{json_str(p.name + "/latest")},{json_str(p.description)}]");
+    }
+    let pidx = f"{{\"p\":[\n{ps.to_str()}],\n\"h\":[]}}\n";
+    for lp in ["", "ko/"] {
+        files.insert(lp + "packages/index.html", index_page(site, listed, chrome, lp));
+        files.insert(lp + "packages/search-index.json", pidx);
+    }
     for gone in [docs_root + "/packages", docs_root + "/ko/packages"] {
         if fs::exists(gone) { try fs::remove_dir_all(gone); }
     }

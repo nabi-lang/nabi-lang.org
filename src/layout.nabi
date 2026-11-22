@@ -737,6 +737,53 @@ pub fn not_found_page(site: Site, dir: str, ko: bool) -> str {
     frame(site, root, f, ver_banner(site, root, out, false))
 }
 
+/// `packages/<name>/` of a package docs page `out` (`ko/` kept), `""`
+/// for the index.
+fn pkg_name(out: str) -> str {
+    let at = out.strip_prefix("ko/") ?? out;
+    let rest = at.strip_prefix("packages/") ?? return "";
+    if let (n, _): (str, str) = rest.split_once("/") { if n == "index.html" { "" } else { n } } else { "" }
+}
+
+/// The directory a package docs page searches: its version's
+/// (`packages/json/0.1.0/`), or `packages/` for the index.
+fn pkg_base(out: str) -> str {
+    let ko = out.starts_with("ko/");
+    let lp = if ko { "ko/" } else { "" };
+    let n = pkg_name(out);
+    if n.is_empty() { return lp + "packages/"; }
+    let at = out[lp.len() + "packages/".len() + n.len() + 1:];
+    let v = if let (x, _): (str, str) = at.split_once("/") { x } else { at };
+    f"{lp}packages/{n}/{v}/"
+}
+
+/// The left of a package docs page's header, as docs.rs has it: the
+/// docs mark back to every package's docs, the package and its version
+/// menu, and its links. The index names itself instead.
+fn pkg_bar(site: Site, f: Frag, ko: bool) -> str {
+    let lp = if ko { "/ko/" } else { "/" };
+    let brand = f"<a class=\"brand\" href=\"{lp}packages/\" lang=\"en\" title=\"{tr(ko, "All package docs", "모든 패키지 문서")}\">{web::chrome::wordmark("Nabi")}<span class=\"sl\" aria-hidden=\"true\">/</span><span class=\"site\">packages</span></a>";
+    let toggle = TOGGLE.replace("aria-label=\"Menu\"", f"aria-label=\"{tr(ko, "Menu", "메뉴")}\"");
+    let lang_docs = nav_item(f"{lp}latest/{if ko { "ko/" } else { "" }}", tr(ko, "Language docs", "언어 문서"), false);
+    let n = pkg_name(f.out);
+    if n.is_empty() {
+        let nav = nav_item(f"{lp}packages/", tr(ko, "Package docs", "패키지 문서"), true) + nav_item(esc(site.packages) + "/packages", tr(ko, "Registry", "레지스트리"), false) + lang_docs;
+        return f"{brand}\n{toggle}\n<nav id=\"nav\" class=\"nav main-nav\" aria-label=\"{tr(ko, "Package docs", "패키지 문서")}\">{nav}</nav>";
+    }
+    let reg = f"{esc(site.packages)}/packages/{esc(n)}";
+    let out = " <span class=\"out\" aria-hidden=\"true\">↗</span>";
+    let vers = if f.pkg_vers.is_empty() { f"<span class=\"pkg-v\">v{esc(f.pkg_ver)}</span>" } else { f"<details class=\"vers\"><summary aria-label=\"{tr(ko, "Package version", "패키지 버전")}: v{esc(f.pkg_ver)}\">v{esc(f.pkg_ver)}</summary><ul class=\"vers-menu\">{f.pkg_vers}</ul></details>" };
+    let title = f"<div class=\"pkg-title\" lang=\"en\"><a class=\"pkg-name\" href=\"/{esc(pkg_base(f.out))}\">{esc(n)}</a>{vers}</div>";
+    let nav = StrBuf::new();
+    nav.push_str(nav_item(f"/{esc(pkg_base(f.out))}", tr(ko, "Docs", "문서"), true));
+    if !f.pkg_src.is_empty() { nav.push_str(nav_item(esc(f.pkg_src), tr(ko, "Source", "소스") + out, false)); }
+    nav.push_str(nav_item(f"{reg}/{esc(f.pkg_ver)}", tr(ko, "Registry", "레지스트리") + out, false));
+    nav.push_str(nav_item(reg + "/dependencies", tr(ko, "Dependencies", "의존성") + out, false));
+    nav.push_str(nav_item(reg + "/dependents", tr(ko, "Dependents", "역의존성") + out, false));
+    nav.push_str(lang_docs);
+    f"{brand}\n{title}\n{toggle}\n<nav id=\"nav\" class=\"nav main-nav\" aria-label=\"{tr(ko, "Package", "패키지")}\">{nav.to_str()}</nav>"
+}
+
 /// The language menu of a package's docs page `out` (pkgdocs): the docs
 /// are in English, so the other language is the same page with the
 /// other language's header and footer (`ko/packages/..`).
@@ -858,11 +905,14 @@ fn frame(site: Site, root: str, f: Frag, banner: str) -> str {
     // to this version's docs (a package's docs: to the newest's).
     let links = chrome::Links { home: site.base_url + "/", docs: f"{site.docs_url}/{if pkg { "latest" } else { site.version }}/", docs_host: site.docs_url + "/", registry: site.packages + "/", playground: site.playground + "/" };
     let play = if !site.newest.is_empty() && site.version == site.newest { esc(site.playground) } else { "" };
+    let pname = pkg_name(out);
     let (skip, menu, sections, find, results, version) = if ko {
         ("본문으로 건너뛰기", "메뉴", "섹션", "문서 검색", "검색 결과", "문서 버전")
     } else {
         ("Skip to content", "Menu", "Sections", "Search docs", "Search results", "Docs version")
     };
+    // A package's docs search that package; the index, every package.
+    let sfind = if !pkg { find } else if pname.is_empty() { tr(ko, "Search packages", "패키지 검색") } else { tr(ko, f"Search {pname}", f"{pname} 검색") };
     let note = if at.starts_with("spec/") { tr(ko, "<span>Spec text © 2026 DaminStudio and the Nabi contributors, <a href=\"https://creativecommons.org/licenses/by/4.0/\">CC BY 4.0</a></span>", "<span>사양 본문 © 2026 DaminStudio and the Nabi contributors, <a href=\"https://creativecommons.org/licenses/by/4.0/\">CC BY 4.0</a></span>") } else { "" };
     let img = if pkg { site.base_url + "/og.png" + (if site.og.is_empty() { "" } else { "?v=" + site.og }) } else { og_image(site, f) };
     let alt = if img.contains("/og/") { if f.title == name { name } else { f.title + " - " + name } } else { pkg::headline(site) };
@@ -870,16 +920,14 @@ fn frame(site: Site, root: str, f: Frag, banner: str) -> str {
 <html class=\"nb lt\" lang=\"{lang}\">
 <head>
 {head(site, root, full, desc, url, img, alt, robots + f.head, ko)}</head>
-<body class=\"{kind}\" data-root=\"{root}\" data-version=\"{if pkg { "" } else { esc(site.version) }}\" data-play=\"{play}\">
+<body class=\"{kind}\" data-root=\"{root}\"{if pkg { f" data-search=\"/{esc(pkg_base(out))}\" data-all=\"{esc(site.packages)}/packages?q=\" data-all-label=\"{tr(ko, "Search all packages on the registry →", "레지스트리에서 모든 패키지 찾기 →")}\"" } else { "" }} data-version=\"{if pkg { "" } else { esc(site.version) }}\" data-play=\"{play}\">
 <a class=\"skip\" href=\"#content\">{skip}</a>
-<header class=\"hdr top\" lang=\"{lang}\">
+<header class=\"hdr top{if pkg { " pkg-hdr" } else { "" }}\" lang=\"{lang}\">
 <div class=\"in\">
-<a class=\"brand\" href=\"{root}{in_lang("index.html", ko)}\" lang=\"en\">{web::chrome::wordmark("Nabi")}<span class=\"sl\" aria-hidden=\"true\">/</span><span class=\"site\">docs</span></a>
-{TOGGLE.replace("aria-label=\"Menu\"", f"aria-label=\"{menu}\"")}
-<nav id=\"nav\" class=\"nav main-nav\" aria-label=\"{sections}\">{nav.to_str()}</nav>
+{if pkg { pkg_bar(site, f, ko) } else { f"<a class=\"brand\" href=\"{root}{in_lang("index.html", ko)}\" lang=\"en\">{web::chrome::wordmark("Nabi")}<span class=\"sl\" aria-hidden=\"true\">/</span><span class=\"site\">docs</span></a>\n{TOGGLE.replace("aria-label=\"Menu\"", f"aria-label=\"{menu}\"")}\n<nav id=\"nav\" class=\"nav main-nav\" aria-label=\"{sections}\">{nav.to_str()}</nav>" }}
 <div class=\"tools\">
-<div class=\"search\" role=\"search\"><button type=\"button\" class=\"s-open\" aria-label=\"{find}\" tabindex=\"-1\" aria-hidden=\"true\">{ICON_SEARCH}</button><input id=\"q\" type=\"search\" placeholder=\"{find}\" aria-label=\"{find}\" aria-keyshortcuts=\"/ Control+K Meta+K\" autocomplete=\"off\" role=\"combobox\" aria-autocomplete=\"list\" aria-expanded=\"false\" aria-controls=\"results\"><kbd class=\"kbd\" aria-hidden=\"true\">/</kbd><ul id=\"results\" class=\"results appear\" role=\"listbox\" aria-label=\"{results}\" hidden></ul><p class=\"sr-only\" role=\"status\"></p></div>
-{if pkg && f.pkg_vers.is_empty() { "" } else if pkg { f"<details class=\"vers\"><summary aria-label=\"Package version: v{esc(f.pkg_ver)}\">v{esc(f.pkg_ver)}</summary><ul class=\"vers-menu\">{f.pkg_vers}</ul></details>" } else { f"<details class=\"vers\"><summary aria-label=\"{version}: {ver}\">{ver}</summary><ul class=\"vers-menu\">{vers_items(site, root, out, lost)}</ul></details>" }}
+<div class=\"search\" role=\"search\"><button type=\"button\" class=\"s-open\" aria-label=\"{sfind}\" tabindex=\"-1\" aria-hidden=\"true\">{ICON_SEARCH}</button><input id=\"q\" type=\"search\" placeholder=\"{sfind}\" aria-label=\"{sfind}\" aria-keyshortcuts=\"/ Control+K Meta+K\" autocomplete=\"off\" role=\"combobox\" aria-autocomplete=\"list\" aria-expanded=\"false\" aria-controls=\"results\"><kbd class=\"kbd\" aria-hidden=\"true\">/</kbd><ul id=\"results\" class=\"results appear\" role=\"listbox\" aria-label=\"{results}\" hidden></ul><p class=\"sr-only\" role=\"status\"></p></div>
+{if pkg { "" } else { f"<details class=\"vers\"><summary aria-label=\"{version}: {ver}\">{ver}</summary><ul class=\"vers-menu\">{vers_items(site, root, out, lost)}</ul></details>" }}
 {switch}
 {chrome::theme_button(ko)}
 </div>
