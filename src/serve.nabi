@@ -36,6 +36,10 @@ static STALE: Atomic<i32> = Atomic::new(1);
 static ACTIVE: Atomic<i32> = Atomic::new(0);
 static DRAWN: Atomic<i32> = Atomic::new(0);
 static FAILED: Atomic<i32> = Atomic::new(0);
+/// Build rounds run since start, and how the last ended (0 none yet,
+/// 1 ok, 2 failed): /healthz, so a deploy can wait for its first round.
+static ROUNDS: Atomic<i32> = Atomic::new(0);
+static LAST: Atomic<i32> = Atomic::new(0);
 const MAX_FAILED: i32 = 3;
 const MAX_CONNS: i32 = 256;
 
@@ -343,7 +347,7 @@ fn rebuild_loop(cfg: Cfg) {
         eprintln(f"cannot find this program to rebuild the site: {e}");
         return;
     };
-    let build = try sh(f"cat {q(exe.as_str())} site.nabion $(find static web/assets/fonts -type f 2>/dev/null | sort) | sha256sum | cut -c1-16") catch e {
+    let build = try sh(f"cat {q(exe.as_str())} site.nabion $(find static web/assets -type f 2>/dev/null | sort) | sha256sum | cut -c1-16") catch e {
         eprintln(f"cannot fingerprint this build: {e}");
         return;
     };
@@ -354,10 +358,13 @@ fn rebuild_loop(cfg: Cfg) {
             try {
                 round(cfg, exe.as_str(), build.trim());
                 FAILED.store(0);
+                LAST.store(1);
             } catch e {
                 eprintln(f"round: {e}");
                 FAILED.fetch_add(1);
+                LAST.store(2);
             };
+            ROUNDS.fetch_add(1);
         }
         thread::sleep(Duration::secs(1));
         idle += 1;
@@ -539,7 +546,7 @@ fn health(cfg: Cfg) -> Resp {
     let latest = latest_of(try fs::read_to_str(cfg.data + "/out/docs/versions.json") catch _ { "" }) ?? "none";
     let failed = FAILED.load();
     let ok = failed < MAX_FAILED && fs::exists(cfg.data + "/out");
-    text(if ok { 200 } else { 503 }, f"{if ok { "ok" } else { "failing" }}\ntoolchain {tc}\nlatest {latest}\nfailed_rounds {failed}")
+    text(if ok { 200 } else { 503 }, f"{if ok { "ok" } else { "failing" }}\ntoolchain {tc}\nlatest {latest}\nfailed_rounds {failed}\nrounds {ROUNDS.load()}\nlast_round {match LAST.load() { 1 => "ok", 2 => "failed", _ => "none" }}")
 }
 
 /// `latest` of versions.json.

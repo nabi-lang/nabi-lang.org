@@ -341,7 +341,7 @@ pub fn release_list(rels: List<Release>, ko: bool) -> str {
 /// releases/<version>.html: the release's date, its summary and notes,
 /// and where to get it; `post` is its announcement's source, linked when
 /// there.
-pub fn release_page(site: Site, r: Release, ko: bool, post: str) -> str {
+pub fn release_page(_site: Site, r: Release, ko: bool, post: str) -> str {
     let notes = layout::md(r.notes, |h| h, false).html;
     let ann = if fs::exists(post) { f" <a href=\"../news/nabi-{markdown::esc(r.version)}.html\">{tr(ko, "Announcement", "발표")}</a>" } else { "" };
     let note = if ko { "<p class=\"note\">릴리스 노트는 영어로만 씁니다.</p>\n" } else { "" };
