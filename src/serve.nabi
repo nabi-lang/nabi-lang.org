@@ -454,7 +454,8 @@ pub fn redirect(path: str, docs: bool) -> str | none {
     // A package's docs without a version: its newest.
     if docs {
         if let name: str = (c.strip_prefix("/ko") ?? c).strip_prefix("/packages/") {
-            if !name.is_empty() && !name.contains("/") { c = c + "/latest"; }
+            // A file of the list (search-index.json) is no package.
+            if !name.is_empty() && !name.contains("/") && !name.contains(".") { c = c + "/latest"; }
         }
     }
     if c == path { none } else { c }
@@ -693,6 +694,7 @@ fn redirects() {
     assert(to("/download/", false) == "/download" && to("/nabi.css", false) == "-", "www");
     assert(to("/install", false) == "/download" && to("/learn", false) == "https://docs.nabi-lang.org/latest/learn" && to("/install", true) == "-", "guessed addresses");
     assert(to("/packages/json", true) == "/packages/json/latest" && to("/packages/json/", true) == "/packages/json/latest", "a package's docs");
+    assert(to("/packages/search-index.json", true) == "-", "the list's search index");
     assert(to("/packages", true) == "-" && to("/packages/json/0.2.0", true) == "-" && to("/packages/json", false) == "-", "package docs pages");
     assert(to("/ko/packages/json", true) == "/ko/packages/json/latest" && to("/ko/packages", true) == "-", "in the Korean chrome");
     assert(query_v("v=abc") == "abc" && query_v("x=1&v=d") == "d" && query_v("vv=1") == "", "query v");
