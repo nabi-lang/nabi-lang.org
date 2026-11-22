@@ -158,14 +158,14 @@ fn menu(pdir: str, rest: str, from: str, vs: List<DocsVersion>, cur: str, latest
 
 /// Each page of package `p` at version `v` (`at`: its directory name,
 /// the version or `latest`), into `files`.
-fn version_pages(site: Site, p: DocsPackage, v: DocsVersion, d: PackageDocs, at: str, vs: List<DocsVersion>, latest: str, pages: Dict<str, Set<str>>, docs: Set<str>, chrome: str, files: Dict<str, str>) {
-    let pdir = f"packages/{p.name}/";
+fn version_pages(site: Site, p: DocsPackage, v: DocsVersion, d: PackageDocs, at: str, vs: List<DocsVersion>, latest: str, pages: Dict<str, Set<str>>, docs: Set<str>, chrome: str, lp: str, files: Dict<str, str>) {
+    let pdir = f"{lp}packages/{p.name}/";
     let base = pdir + at + "/";
     if d.status.state != "ok" {
         let why = if d.status.state == "nolib" { "it has no library (<code>src/lib.nabi</code>), so no API." } else { f"they could not be made: {esc(d.status.message)}. The version is published and installs as usual." };
         let out = base + "index.html";
         let body = f"<h1><code>{esc(p.name)}</code> {esc(v.version)}</h1><p>No docs for this version: {why}</p>";
-        let f = Frag { out: out, title: f"{p.name} {v.version}", side: "", body: body, pager: "", head: "", pkg_ver: v.version, pkg_vers: menu(pdir, "index.html", out, vs, v.version, latest, pages) };
+        let f = Frag { out: out, title: f"{p.name} {v.version}", side: "", body: body, pager: "", head: alternates(site, out), pkg_ver: v.version, pkg_vers: menu(pdir, "index.html", out, vs, v.version, latest, pages) };
         files.insert(out, layout::package_page(site, f, chrome));
         return;
     }
@@ -181,7 +181,7 @@ fn version_pages(site: Site, p: DocsPackage, v: DocsVersion, d: PackageDocs, at:
     for m in mods {
         let deps: List<nav::Package> = List::new();
         for dn in p.deps {
-            let href = if docs.contains(dn) { rel(m.out, f"packages/{dn}/latest/index.html") } else { "" };
+            let href = if docs.contains(dn) { rel(m.out, f"{lp}packages/{dn}/latest/index.html") } else { "" };
             deps.push(nav::Package { name: dn, href: href });
         }
         let notes: Dict<str, str> = Dict::new();
@@ -191,7 +191,7 @@ fn version_pages(site: Site, p: DocsPackage, v: DocsVersion, d: PackageDocs, at:
         let links = f"<p class=\"pkg-links\"><a href=\"{esc(site.packages)}/packages/{p.name}/{v.version}\">{esc(p.name)} {esc(v.version)} on the registry <span aria-hidden=\"true\">↗</span></a>{tree}</p>";
         let html = if let k: usize = html.find("</h1>") { html[:k + 5] + links + html[k + 5:] } else { links + html };
         let rest = m.out[base.len():];
-        let f = Frag { out: m.out, title: m.path, side: apidoc::package_sidebar(m, mods, m.out, v.version, deps), toc: apidoc::toc(heads), body: html, pager: "", head: "", trail: apidoc::crumb(m, mods), pkg_ver: v.version, pkg_vers: menu(pdir, rest, m.out, vs, v.version, latest, pages) };
+        let f = Frag { out: m.out, title: m.path, side: apidoc::package_sidebar(m, mods, m.out, v.version, deps), toc: apidoc::toc(heads), body: html, pager: "", head: alternates(site, m.out), trail: apidoc::crumb(m, mods), pkg_ver: v.version, pkg_vers: menu(pdir, rest, m.out, vs, v.version, latest, pages) };
         files.insert(m.out, layout::package_page(site, f, chrome));
     }
 }
@@ -206,7 +206,7 @@ fn module_pages(d: PackageDocs) -> Set<str> {
 }
 
 /// `/packages/`: every package with docs, newest version first.
-fn index_page(site: Site, pkgs: List<(DocsPackage, str)>, chrome: str) -> str {
+fn index_page(site: Site, pkgs: List<(DocsPackage, str)>, chrome: str, lp: str) -> str {
     let b = StrBuf::new();
     b.push_str("<h1>Package docs</h1>");
     b.push_str(f"<p>The API of each package on <a href=\"{esc(site.packages)}\">packages.nabi-lang.org</a>, from its doc comments, per version. The registry makes them when a version is published; this list is the newest version of each.</p>");
@@ -216,13 +216,22 @@ fn index_page(site: Site, pkgs: List<(DocsPackage, str)>, chrome: str) -> str {
         b.push_str(f"<li><a href=\"{p.name}/latest\"><code>{esc(p.name)}</code></a> <small>{esc(v)}</small>{tag} <span>{esc(p.description)}</span></li>");
     }
     b.push_str("</ul>");
-    let f = Frag { out: "packages/index.html", title: "Package docs", side: "", body: b.to_str(), pager: "", head: "", pkg_ver: "-" };
+    let out = lp + "packages/index.html";
+    let f = Frag { out: out, title: "Package docs", side: "", body: b.to_str(), pager: "", head: alternates(site, out), pkg_ver: "-" };
     layout::package_page(site, f, chrome)
 }
 
 /// Package docs written while the registry served them itself link to
 /// `<registry>/docs/<name>/<version>`, which no longer exists: here.
-fn moved(site: Site, html: str) -> str { html.replace(f"href=\"{site.packages}/docs/", "href=\"/packages/") }
+fn moved(site: Site, html: str, ko: bool) -> str { html.replace(f"href=\"{site.packages}/docs/", if ko { "href=\"/ko/packages/" } else { "href=\"/packages/" }) }
+
+/// The `<link rel="alternate">`s of a package page `out`: its English
+/// page and the same in the Korean header and footer.
+fn alternates(site: Site, out: str) -> str {
+    let en = out.strip_prefix("ko/") ?? out;
+    let u = |o: str| esc(site.docs_url + web::url::canon("/" + o));
+    f"<link rel=\"alternate\" hreflang=\"en\" href=\"{u(en)}\">\n<link rel=\"alternate\" hreflang=\"ko\" href=\"{u("ko/" + en)}\">\n<link rel=\"alternate\" hreflang=\"x-default\" href=\"{u(en)}\">\n"
+}
 
 /// Every package's pages from `dir` (sync) into `docs_root/packages/`,
 /// with chrome linking into the docs version directory `chrome`; the
@@ -251,25 +260,30 @@ pub fn write(site: Site, docs_root: str, dir: str, chrome: str) throws -> usize 
             loaded.insert(v.version, d);
             pages.insert(v.version, module_pages(d));
         }
-        for v in vs {
-            let d = loaded.get(v.version) ?? { continue; };
-            version_pages(site, p, v, d, v.version, vs, newest.version, pages, docs, chrome, files);
-            if v.version == newest.version {
-                version_pages(site, p, v, d, "latest", vs, newest.version, pages, docs, chrome, files);
+        // Each page twice: the docs are in English, and `ko/` is the
+        // same page in the Korean header and footer.
+        for lp in ["", "ko/"] {
+            for v in vs {
+                let d = loaded.get(v.version) ?? { continue; };
+                version_pages(site, p, v, d, v.version, vs, newest.version, pages, docs, chrome, lp, files);
+                if v.version == newest.version {
+                    version_pages(site, p, v, d, "latest", vs, newest.version, pages, docs, chrome, lp, files);
+                }
             }
         }
         listed.push((p, newest.version));
     }
     if listed.is_empty() { return 0usize; }
     listed.sort_by(|a: (DocsPackage, str), b: (DocsPackage, str)| a.0.name.cmp(b.0.name));
-    files.insert("packages/index.html", index_page(site, listed, chrome));
-    let out = docs_root + "/packages";
-    if fs::exists(out) { try fs::remove_dir_all(out); }
+    for lp in ["", "ko/"] { files.insert(lp + "packages/index.html", index_page(site, listed, chrome, lp)); }
+    for gone in [docs_root + "/packages", docs_root + "/ko/packages"] {
+        if fs::exists(gone) { try fs::remove_dir_all(gone); }
+    }
     for k in files.keys() {
         let path = docs_root + "/" + k;
         try fs::create_dir_all(path[:path.rfind("/") ?? 0]);
         // Served at canonical addresses (no `.html`): links from the root.
-        try fs::write(path, links::site_hrefs(site, moved(site, files[k]), "", k));
+        try fs::write(path, links::site_hrefs(site, moved(site, files[k], k.starts_with("ko/")), "", k));
     }
     files.len()
 }

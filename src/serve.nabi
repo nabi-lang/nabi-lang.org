@@ -402,8 +402,9 @@ pub fn cache_for(f: str, path: str, query: str, docs: bool) -> str {
         let first = (path[1:].split_once("/") ?? (path[1:], "")).0;
         // A package version's docs change only when the registry's scan
         // does; latest/ and the list follow new versions.
-        if docs && first == "packages" {
-            let rest = (path["/packages/".len():].split_once("/") ?? ("", "")).1;
+        let pp = path.strip_prefix("/ko") ?? path;
+        if docs && pp.starts_with("/packages/") {
+            let rest = (pp["/packages/".len():].split_once("/") ?? ("", "")).1;
             let ver = (rest.split_once("/") ?? (rest, "")).0;
             return if ver.split(".").count() == 3 { "public, max-age=86400, stale-while-revalidate=604800" } else { "public, max-age=300, stale-while-revalidate=86400" };
         }
@@ -431,7 +432,7 @@ pub fn redirect(path: str, docs: bool) -> str | none {
     if docs && c == "/" { c = "/latest"; }
     // A package's docs without a version: its newest.
     if docs {
-        if let name: str = c.strip_prefix("/packages/") {
+        if let name: str = (c.strip_prefix("/ko") ?? c).strip_prefix("/packages/") {
             if !name.is_empty() && !name.contains("/") { c = c + "/latest"; }
         }
     }
@@ -663,6 +664,7 @@ fn redirects() {
     assert(to("/download/", false) == "/download" && to("/nabi.css", false) == "-", "www");
     assert(to("/packages/json", true) == "/packages/json/latest" && to("/packages/json/", true) == "/packages/json/latest", "a package's docs");
     assert(to("/packages", true) == "-" && to("/packages/json/0.2.0", true) == "-" && to("/packages/json", false) == "-", "package docs pages");
+    assert(to("/ko/packages/json", true) == "/ko/packages/json/latest" && to("/ko/packages", true) == "-", "in the Korean chrome");
     assert(query_v("v=abc") == "abc" && query_v("x=1&v=d") == "d" && query_v("vv=1") == "", "query v");
     assert(cache_for("out/www/nabi.css", "/nabi.css", "v=1", false) == "public, max-age=3600", "stale version");
     assert(cache_for("out/www/og.png", "/og.png", "", false) == "public, max-age=3600", "bare og");

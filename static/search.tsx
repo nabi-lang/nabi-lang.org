@@ -285,7 +285,7 @@ import { Results, type Hit as Shown, type ResultsProps, type Row } from "./ui/re
 
   // Spec language switch: carry the current section over to the other
   // edition (data-sec pairs this page's heading ids with the other's).
-  const sw = document.querySelector<HTMLElement>(".lang-switch[data-sec]");
+  const sw = document.querySelector<HTMLElement>(".lang-menu[data-sec]");
   const other = sw && sw.querySelector<HTMLAnchorElement>("a[hreflang]");
   // other is only set when sw is
   if (sw && other) {

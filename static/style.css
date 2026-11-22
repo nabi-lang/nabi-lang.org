@@ -221,10 +221,6 @@ a.ecode:hover { text-decoration-style: solid; }
 .crumb a, .crumb .here { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .crumb a { flex: 0 1 auto; min-width: 2em; }
 .crumb .here { flex: 1 1 auto; min-width: 0; }
-.lang-switch { margin-left: auto; display: flex; gap: 2px; padding: 2px; border: 1px solid var(--line-2); border-radius: var(--r); }
-.lang-switch > :is(a, span) { padding: 2px 10px; border-radius: var(--r); color: var(--ink-2); }
-.lang-switch a:hover { color: var(--ink); text-decoration: none; }
-.lang-switch span[aria-current] { background: var(--panel); color: var(--ink); box-shadow: 0 0 0 1px var(--field-line); }
 .prose .tr-note { padding: 10px 14px; border: 1px solid var(--line); border-radius: var(--r); background: var(--bg-2); color: var(--ink-2); font-size: 14px; line-height: 20px; }
 .prose .edit { margin: 48px 0 16px; font-size: 13px; line-height: 18px; color: var(--ink-3); }
 .prose .edit .upd { margin-left: 8px; white-space: nowrap; }

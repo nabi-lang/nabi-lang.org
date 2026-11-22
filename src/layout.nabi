@@ -759,17 +759,24 @@ pub fn not_found_page(site: Site, dir: str, ko: bool) -> str {
     frame(site, root, f, ver_banner(site, root, out, false))
 }
 
-/// EN / Korean switch of the page `at` (without `ko/`): links to `alt`,
-/// the other language's page, from the version root, else to the same
-/// path in the other language. `sec` pairs this page's heading ids with
-/// the other's (search.js).
+/// The language menu of a package's docs page `out` (pkgdocs): the docs
+/// are in English, so the other language is the same page with the
+/// other language's header and footer (`ko/packages/..`).
+fn pkg_switch(out: str, ko: bool) -> str {
+    let en = out.strip_prefix("ko/") ?? out;
+    let up = root_of(out);
+    chrome::lang_menu(ko, [chrome::Lang { code: "en", name: "English", href: if ko { up + en } else { "" } }, chrome::Lang { code: "ko", name: "한국어", href: if ko { "" } else { up + "ko/" + en } }], "")
+}
+
+/// The header's language menu (chrome::lang_menu) of the page `at`
+/// (without `ko/`): the other language's page is `alt`, from the version
+/// root, else the same path in the other language. `sec` pairs this
+/// page's heading ids with the other's (search.js).
 fn lang_switch(root: str, at: str, ko: bool, alt: str, sec: str) -> str {
     let other = if !alt.is_empty() { alt } else if ko { at } else { "ko/" + at };
     let href = root + other;
     let data = if sec.is_empty() { "" } else { f" data-sec=\"{esc(sec)}\"" };
-    let en = if ko { f"<a href=\"{href}\" hreflang=\"en\" lang=\"en\">English</a>" } else { "<span aria-current=\"true\" lang=\"en\">English</span>" };
-    let kr = if ko { "<span aria-current=\"true\" lang=\"ko\">한국어</span>" } else { f"<a href=\"{href}\" hreflang=\"ko\" lang=\"ko\">한국어</a>" };
-    f"<nav class=\"lang-switch\" aria-label=\"{tr(ko, "Language", "언어")}\"{data}>{en}{kr}</nav>"
+    chrome::lang_menu(ko, [chrome::Lang { code: "en", name: "English", href: if ko { href } else { "" } }, chrome::Lang { code: "ko", name: "한국어", href: if ko { "" } else { href } }], data)
 }
 
 /// The version menu's items: each released version and dev, linking to
@@ -817,14 +824,17 @@ fn frame(site: Site, root: str, f: Frag, banner: str) -> str {
     }
     let name = tr(ko, "Nabi Docs", "Nabi 문서");
     let full = (if at == "index.html" { name } else { f.title + " - " + name }) + (if pkg { "" } else { ver_suffix(site) });
-    let contents = tr(ko, "Contents", "목차");
-    let on_this = tr(ko, "On this page", "이 페이지의 내용");
+    // A package's docs are English: in its Korean chrome only the header
+    // and the footer are Korean.
+    let inner = ko && !pkg;
+    let contents = tr(inner, "Contents", "목차");
+    let on_this = tr(inner, "On this page", "이 페이지의 내용");
     // On narrow screens the sidebar is a drawer, opened from a bar in
     // the sticky header (search.js).
     let (aside, bar) = if f.side.is_empty() {
         ("", "")
     } else {
-        (f"<nav id=\"side\" class=\"side\" aria-label=\"{contents}\"><div class=\"side-h\"><p class=\"t-label\">{contents}</p><button class=\"ib side-close\" type=\"button\" aria-label=\"{tr(ko, "Close contents", "목차 닫기")}\">{ICON_CLOSE}</button></div>{f.side}</nav>\n", f"<div class=\"cbar\"><button class=\"side-toggle\" type=\"button\" aria-controls=\"side\" aria-expanded=\"false\">{ICON_SIDE}{contents}</button></div>\n")
+        (f"<nav id=\"side\" class=\"side\" aria-label=\"{contents}\"><div class=\"side-h\"><p class=\"t-label\">{contents}</p><button class=\"ib side-close\" type=\"button\" aria-label=\"{tr(inner, "Close contents", "목차 닫기")}\">{ICON_CLOSE}</button></div>{f.side}</nav>\n", f"<div class=\"cbar\"><button class=\"side-toggle\" type=\"button\" aria-controls=\"side\" aria-expanded=\"false\">{ICON_SIDE}{tr(ko, "Contents", "목차")}</button></div>\n")
     };
     let on_page = if f.toc.is_empty() { "" } else { f"<aside class=\"toc\" aria-label=\"{on_this}\"><p class=\"t-label\">{on_this}</p><ul>{f.toc}</ul></aside>\n" };
     // Below the wide layout's "On this page" column: the same list,
@@ -838,9 +848,9 @@ fn frame(site: Site, root: str, f: Frag, banner: str) -> str {
     };
     let kind = if at == "index.html" { "home" } else if f.side.is_empty() { "doc wide" } else { "doc" };
     // One line says where the page is: its section and, in the guide,
-    // the chapter; the language switch sits at its end.
+    // the chapter. The language menu is in the header.
     let crumb = if !f.trail.is_empty() {
-        if ko { f.trail.replace("aria-label=\"Breadcrumb\"", "aria-label=\"이동 경로\"") } else { f.trail }
+        if inner { f.trail.replace("aria-label=\"Breadcrumb\"", "aria-label=\"이동 경로\"") } else { f.trail }
     } else if sec.is_empty() || at == sec_index || lost {
         ""
     } else {
@@ -855,8 +865,8 @@ fn frame(site: Site, root: str, f: Frag, banner: str) -> str {
         };
         f"<nav class=\"crumb\" aria-label=\"{tr(ko, "Breadcrumb", "이동 경로")}\"><a href=\"{root}{in_lang(sec_index, ko)}\">{tr(ko, sec_en, sec_ko)}</a>{chap}</nav>"
     };
-    let switch = if lost || pkg { "" } else { lang_switch(root, at, ko, f.alt, f.sec) };
-    let pagehead = if crumb.is_empty() && switch.is_empty() { "" } else { f"<div class=\"pagehead\">{crumb}{switch}</div>\n" };
+    let switch = if lost { "" } else if pkg { pkg_switch(out, ko) } else { lang_switch(root, at, ko, f.alt, f.sec) };
+    let pagehead = if crumb.is_empty() { "" } else { f"<div class=\"pagehead\">{crumb}</div>\n" };
     let lang = if ko { "ko" } else { "en" };
     let desc = esc(describe(site, out, body));
     // A 404 page has no address of its own; the Korean API pages are the
@@ -890,11 +900,12 @@ fn frame(site: Site, root: str, f: Frag, banner: str) -> str {
 <div class=\"tools\">
 <div class=\"search\" role=\"search\"><button type=\"button\" class=\"s-open\" aria-label=\"{find}\" tabindex=\"-1\" aria-hidden=\"true\">{ICON_SEARCH}</button><input id=\"q\" type=\"search\" placeholder=\"{find}\" aria-label=\"{find}\" aria-keyshortcuts=\"/ Control+K Meta+K\" autocomplete=\"off\" role=\"combobox\" aria-autocomplete=\"list\" aria-expanded=\"false\" aria-controls=\"results\"><kbd class=\"kbd\" aria-hidden=\"true\">/</kbd><ul id=\"results\" class=\"results appear\" role=\"listbox\" aria-label=\"{results}\" hidden></ul><p class=\"sr-only\" role=\"status\"></p></div>
 {if pkg && f.pkg_vers.is_empty() { "" } else if pkg { f"<details class=\"vers\"><summary aria-label=\"Package version: v{esc(f.pkg_ver)}\">v{esc(f.pkg_ver)}</summary><ul class=\"vers-menu\">{f.pkg_vers}</ul></details>" } else { f"<details class=\"vers\"><summary aria-label=\"{version}: {ver}\">{ver}</summary><ul class=\"vers-menu\">{vers_items(site, root, out, lost)}</ul></details>" }}
+{switch}
 {chrome::theme_button(ko)}
 </div>
 </div>
 {bar}</header>
-{banner}<div class=\"shell\">
+{banner}<div class=\"shell\"{if pkg && ko { " lang=\"en\"" } else { "" }}>
 {aside}<main id=\"content\" class=\"main\">
 <article class=\"prose\">
 {pagehead}{body}{f.pager}
@@ -965,9 +976,9 @@ pub fn www_page(site: Site, out: str, title: str, body: str) -> str {
 {TOGGLE.replace("aria-label=\"Menu\"", f"aria-label=\"{tr(ko, "Menu", "메뉴")}\"")}
 <nav id=\"nav\" class=\"nav main-nav\" aria-label=\"{tr(ko, "Main", "주 메뉴")}\">{nav.to_str()}</nav>
 <div class=\"tools\">
-{switch}
 <a class=\"gh\" href=\"https://github.com/nabi-lang/nabi\">GitHub</a>
 <a class=\"btn btn-sm\" href=\"{home}download.html\"{install}>{tr(ko, "Install", "설치")}</a>
+{switch}
 {chrome::theme_button(ko)}
 </div>
 </div>
