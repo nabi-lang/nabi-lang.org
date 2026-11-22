@@ -735,8 +735,10 @@ const TOGGLE: str = "<button class=\"nav-toggle\" type=\"button\" aria-label=\"M
 
 
 /// The footer every Nabi site shares (chrome::site_cols, legal links in
-/// its bar). `on` is the site the page belongs to, `home` or `docs`.
-fn footer(site: Site, l: chrome::Links, note: str, logo: str, lg: Lang, on: str) -> str {
+/// its bar). `on` is the site the page belongs to, `home` or `docs`;
+/// `repo` the content repository a Chinese page reports a translation
+/// problem to.
+fn footer(site: Site, l: chrome::Links, note: str, logo: str, lg: Lang, on: str, repo: str) -> str {
     chrome::footer(chrome::Footer {
         home: l.home + lg.dir(),
         logo: logo,
@@ -746,6 +748,7 @@ fn footer(site: Site, l: chrome::Links, note: str, logo: str, lg: Lang, on: str)
         after: note,
         lang: lg,
         release: site.release,
+        repo: repo,
     })
 }
 
@@ -1074,7 +1077,7 @@ fn frame(site: Site, root: str, f: Frag, banner: str) -> str {
 </article>
 {on_page}</main>
 </div>
-{footer(site, links, note, root + "logo.svg", l, "docs")}<script src=\"{asset(site, root, "keys.js")}\" defer></script>
+{footer(site, links, note, root + "logo.svg", l, "docs", if at.starts_with("spec/") { "spec" } else { "docs" })}<script src=\"{asset(site, root, "keys.js")}\" defer></script>
 <script src=\"{asset(site, root, "copy.js")}\" defer></script>
 {chrome::palette_script(asset(site, root, "palette.js"), chrome::Palette { pkgdocs: "/" + l.dir() + "packages/", registry: site.packages })}<script src=\"{asset(site, root, "search.js")}\" defer></script>
 </body>
@@ -1194,7 +1197,7 @@ pub fn www_page_with(site: Site, out: str, title: str, body: str, more: str, rea
 </header>
 <main id=\"content\">
 {main}</main>
-{footer(site, links, "", root + "logo.svg", l, "home")}<script src=\"{asset(site, root, "keys.js")}\" defer></script>
+{footer(site, links, "", root + "logo.svg", l, "home", "www")}<script src=\"{asset(site, root, "keys.js")}\" defer></script>
 <script src=\"{asset(site, root, "copy.js")}\" defer></script>
 {chrome::palette_script(asset(site, root, "palette.js"), chrome::Palette { docs: site.docs_url + "/latest/", pkgdocs: site.docs_url + (if l.is_en() { "" } else { "/" + l.slug() }) + "/packages/", registry: site.packages })}<script src=\"{asset(site, root, "search.js")}\" defer></script>
 </body>
