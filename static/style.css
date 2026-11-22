@@ -102,7 +102,9 @@ button { font: inherit; }
 .side-title { margin: 0 0 4px; }
 .side-title a { color: var(--ink); font-weight: 600; }
 .side .no { width: auto; min-width: 18px; padding-top: 1px; }
-.side .pages .pages { margin: 2px 0 6px 19px; padding-left: 4px; border-left: 1px solid var(--line); }
+.side .pages .pages { margin: 2px 0 6px 10px; padding-left: 0; border-left: 1px solid var(--line); }
+.side .pages .pages a { gap: 6px; padding-left: 8px; }
+.side .pages .pages .no { min-width: 0; }
 .side li.open > a { color: var(--ink); font-weight: 500; }
 
 .main { flex: 1 1 0; min-width: 0; display: flex; justify-content: center; gap: 56px; padding: 40px 56px 96px; }
