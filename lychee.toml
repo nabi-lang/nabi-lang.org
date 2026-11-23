@@ -1,7 +1,7 @@
 # lychee over the built pages (CI). The generator checks every internal
 # link itself; this adds the anchors and the links that leave the sites.
 
-include_fragments = true
+include_fragments = "anchor-only"
 fallback_extensions = ["html"]
 index_files = ["index.html"]
 max_concurrency = 16
