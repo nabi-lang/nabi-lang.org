@@ -3,6 +3,13 @@
 
 include_fragments = "anchor-only"
 fallback_extensions = ["html"]
+# Pages whose last segment has a dot (a version) or shares its name with
+# a directory (brand/ holds the brand files): lychee takes the dot for an
+# extension and the directory for the page, so name the .html.
+remap = [
+    '^(file://.*/(news/nabi-|releases/)\d+\.\d+\.\d+)$ $1.html',
+    '^(file://.*/public/www(/[a-z-]+)?/brand)$ $1.html',
+]
 index_files = ["index.html"]
 max_concurrency = 16
 max_retries = 2
@@ -15,6 +22,8 @@ exclude = [
     '/cdn-cgi/l/email-protection',
     '/cdn-cgi/scripts/',
     '^mailto:',
+    # The playground reads #src= in the page; it is not an anchor.
+    '^https://playground\.nabi-lang\.org/.*#src=',
     # Other docs versions: a CI build makes dev/ only.
     '^file://.*/public/docs/(latest|\d+\.\d+(\.\d+)?)(/|$)',
     # Edit links to files a pull request may add.
