@@ -10,7 +10,7 @@ fallback_extensions = ["html"]
 remap = [
     '^(file://.*/(news/nabi-|releases/)\d+\.\d+\.\d+)(#.*)?$ $1.html$3',
     '^(file://.*/public/www(/[a-z-]+)?/brand)(#.*)?$ $1.html$3',
-    '^(file://.*/(trait|impl|struct|enum|fn|type|const|static|union|macro|alias)\.[^/#?]+)(#.*)?$ $1.html$3',
+    '^(file://.*/(trait|impl|struct|enum|fn|type|const|static|union|macro|alias)\.[^/#?.]+)(#.*)?$ $1.html$3',
 ]
 # A directory with no index.html is a module whose page sits beside it
 # as <name>.html; the generator has checked that link already.
@@ -28,8 +28,9 @@ exclude = [
     '^mailto:',
     # The playground reads #src= in the page; it is not an anchor.
     '^https://playground\.nabi-lang\.org/.*#src=',
-    # Paths in code examples.
+    # Addresses in code examples.
     '^file:///srv/',
+    '^https?://(127\.0\.0\.1|localhost)[:/]',
     # Other docs versions: a CI build makes dev/ only.
     '^file://.*/public/docs/(latest|\d+\.\d+(\.\d+)?)(/|$)',
     # Edit links to files a pull request may add.
