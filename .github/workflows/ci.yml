@@ -91,12 +91,14 @@ jobs:
           workingDirectory: nabi-lang.org
           fail: true
           args: --config lychee.toml --root-dir ${{ github.workspace }}/nabi-lang.org/public/www public/www
+      # The docs link into docs.nabi-lang.org/latest by the thousand: the
+      # generator checks those, and lychee would only meet its rate limits.
       - name: Links, docs.nabi-lang.org
         uses: lycheeverse/lychee-action@v2
         with:
           workingDirectory: nabi-lang.org
           fail: true
-          args: --config lychee.toml --root-dir ${{ github.workspace }}/nabi-lang.org/public/docs public/docs/dev public/docs/packages
+          args: --config lychee.toml --exclude '^https://docs\.nabi-lang\.org/' --root-dir ${{ github.workspace }}/nabi-lang.org/public/docs public/docs/dev public/docs/packages
 
   # The one required check (rulesets/main.json): passes when every job
   # passed or was skipped.
