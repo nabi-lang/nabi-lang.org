@@ -859,7 +859,7 @@ fn pkg_bar(site: Site, f: Frag, l: Lang) -> str {
     let lp = "/" + l.dir();
     let brand = f"<a class=\"brand\" href=\"{lp}packages/\" lang=\"en\" title=\"{tr(l, "All package docs", "모든 패키지 문서", "所有包文档", "所有套件文件")}\">{web::chrome::wordmark("Nabi")}<span class=\"sl\" aria-hidden=\"true\">/</span><span class=\"site\">packages</span></a>";
     let toggle = TOGGLE.replace("aria-label=\"Menu\"", f"aria-label=\"{menu_word(l)}\"");
-    let lang_docs = nav_item(f"{lp}latest/{l.dir()}", tr(l, "Language docs", "언어 문서", "语言文档", "語言文件"), false);
+    let lang_docs = nav_item(f"/latest/{l.dir()}", tr(l, "Language docs", "언어 문서", "语言文档", "語言文件"), false);
     let pkg_docs = l.words().package_docs;
     let registry = tr(l, "Registry", "레지스트리", "注册表", "套件庫");
     let n = pkg_name(f.out);
