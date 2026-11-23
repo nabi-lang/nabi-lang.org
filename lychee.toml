@@ -30,7 +30,10 @@ exclude = [
     '^https://playground\.nabi-lang\.org/.*#src=',
     # Addresses in code examples.
     '^file:///srv/',
-    '^https?://(127\.0\.0\.1|localhost)[:/]',
+    '^https?://(127\.0\.0\.1|localhost|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+)[:/]',
+    # Source links the docs make, at a pinned commit: thousands of them,
+    # and github.com answers a share of any such burst with a 502.
+    '^https://github\.com/nabi-lang/[^/]+/blob/[0-9a-f]{40}/',
     # Other docs versions: a CI build makes dev/ only.
     '^file://.*/public/docs/(latest|\d+\.\d+(\.\d+)?)(/|$)',
     # Edit links to files a pull request may add.
